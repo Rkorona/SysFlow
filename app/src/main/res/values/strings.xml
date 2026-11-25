@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">SysFlow</string>
+    <string name="nav_overview">总览</string>
+    <string name="nav_modules">模块</string>
+    <string name="nav_settings">设置</string>
+</resources>

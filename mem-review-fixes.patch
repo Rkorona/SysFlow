@@ -1,0 +1,621 @@
+diff -ruN a/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt b/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt
+--- a/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt	2026-11-25 10:44:00.000000000 +0000
++++ b/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt	2026-11-25 12:07:31.528881086 +0000
+@@ -73,6 +73,7 @@
+     "mem_pressure_high" to "内存压力偏高",
+     "mem_pressure_recovered" to "内存压力已恢复",
+     "mem_oom_kill" to "内核内存不足",
++    "mem_setting_contested" to "内存设置被反复改回",
+     "settings_applied" to "设置已更新",
+     "settings_partially_applied" to "设置部分生效",
+     "settings_apply_failed" to "设置写入失败",
+@@ -230,6 +231,18 @@
+         "mem_oom_kill" -> meta.number("count")?.roundPercent()?.takeIf { it > 0 }
+             ?.let { "内核因内存不足杀死了 $it 个进程" }
+             ?: "内核因内存不足杀死了进程"
++        "mem_setting_contested" -> {
++            // The module gave up on this value: something else keeps resetting it, so SysFlow stops
++            // fighting instead of rewriting it every few seconds.
++            val name = when (meta.string("item")) {
++                "mem.swappiness" -> "swappiness"
++                "mem.vfs_cache_pressure" -> "vfs_cache_pressure"
++                else -> "内存参数"
++            }
++            val live = meta.number("live")?.roundPercent()?.let { " $it" } ?: ""
++            val hours = meta.number("suppress_s")?.div(3600.0)?.roundPercent()?.takeIf { it > 0 } ?: 6L
++            "系统反复把 $name 改回$live，已暂停重新应用 $hours 小时"
++        }
+         else -> event.message
+     }
+ }
+diff -ruN a/core/sysflow-cli/src/mem_apps.rs b/core/sysflow-cli/src/mem_apps.rs
+--- a/core/sysflow-cli/src/mem_apps.rs	2026-11-25 19:15:08.000000000 +0000
++++ b/core/sysflow-cli/src/mem_apps.rs	2026-11-25 12:06:14.070759047 +0000
+@@ -11,11 +11,10 @@
+ 
+ use std::collections::BTreeMap;
+ use std::path::{Path, PathBuf};
+-use std::process::{Command, Stdio};
+ 
+ use serde_json::{json, Map, Value};
+ 
+-use sysflow_core::batterystats::{aid_label, parse_package_uids};
++use sysflow_core::batterystats::{aid_label, read_package_uids};
+ use sysflow_core::cache;
+ use sysflow_core::error::Result;
+ use sysflow_core::registry::Registry;
+@@ -296,24 +295,10 @@
+     Some(out)
+ }
+ 
+-/// Fallback for ROMs that hide the database: `cmd package list packages -U`.
++/// Fallback for ROMs that hide the database: `cmd package list packages -U`, through the shared
++/// helper so the call has a timeout (a stuck package service must not wedge the ranking).
+ fn read_packages_from_service() -> BTreeMap<u32, Vec<String>> {
+-    let output = Command::new("cmd")
+-        .args(["package", "list", "packages", "-U"])
+-        .stdout(Stdio::piped())
+-        .stderr(Stdio::null())
+-        .spawn()
+-        .ok()
+-        .and_then(|child| child.wait_with_output().ok());
+-    match output {
+-        Some(output) => parse_package_uids(
+-            String::from_utf8_lossy(&output.stdout)
+-                .lines()
+-                .map(str::to_string)
+-                .collect::<Vec<_>>(),
+-        ),
+-        None => BTreeMap::new(),
+-    }
++    read_package_uids()
+ }
+ 
+ /// Android's short UID form, the inverse of `batterystats::resolve_uid`: ordinary app ids carry a
+diff -ruN a/core/sysflow-modules/src/mem/history.rs b/core/sysflow-modules/src/mem/history.rs
+--- a/core/sysflow-modules/src/mem/history.rs	2026-11-25 10:32:02.000000000 +0000
++++ b/core/sysflow-modules/src/mem/history.rs	2026-11-25 12:06:14.050669710 +0000
+@@ -228,7 +228,14 @@
+         && uptime >= previous.uptime_s
+         && !counters.regressed(&previous.counters);
+ 
+-    let elapsed_s = now_ts.saturating_sub(previous.ts) as f64;
++    // Measured on the boot clock when both samples have one: the wall clock jumps whenever the phone
++    // resyncs time, and a rate divided by a jumped interval is wrong in a way nothing downstream can
++    // detect. The wall clock is only the fallback for a device without `/proc/uptime`.
++    let elapsed_s = if previous.uptime_s > 0.0 && uptime > previous.uptime_s {
++        uptime - previous.uptime_s
++    } else {
++        now_ts.saturating_sub(previous.ts) as f64
++    };
+     if usable {
+         let delta = |now: Option<u64>, before: Option<u64>| match (now, before) {
+             (Some(now), Some(before)) if now >= before => Some(now - before),
+@@ -331,8 +338,16 @@
+                         HIGH_PCT as f64 / 100.0,
+                         HIGH_SAMPLES
+                     ))
+-                    // The one place the module shells out while sampling, and only on an event.
+-                    .metadata(with_exit_info(context(&out, psi_full, psi_full_avg60)))
++                    // The one place the module shells out while sampling, and only on an event that
++                    // will actually be recorded.
++                    .metadata({
++                        let metadata = context(&out, psi_full, psi_full_avg60);
++                        if events.is_some() {
++                            with_exit_info(metadata)
++                        } else {
++                            metadata
++                        }
++                    })
+                     .dedupe("mem.pressure.high", EVENT_WINDOW_S),
+                 );
+             } else if pressure.active && pressure.low_streak >= RECOVER_SAMPLES {
+@@ -372,7 +387,12 @@
+                     .message(format!(
+                         "{count} kernel OOM kill(s) since the previous sample"
+                     ))
+-                    .metadata(context(&out, psi_full, psi_full_avg60))
++                    .metadata({
++                        // The page words this as "N processes", so the count travels with the event.
++                        let mut metadata = context(&out, psi_full, psi_full_avg60);
++                        metadata["count"] = json!(count);
++                        metadata
++                    })
+                     .dedupe("mem.oom_kill", EVENT_WINDOW_S),
+                 );
+             }
+@@ -414,10 +434,10 @@
+ 
+ fn last_low_memory_exit() -> Option<Value> {
+     let text = command::run("dumpsys", &["activity", "exit-info"], EXIT_INFO_TIMEOUT).ok()?;
+-    parse_last_low_memory(&text)
++    parse_newest_low_memory(&text)
+ }
+ 
+-/// Pull the newest `reason=3 (LOW_MEMORY)` record out of an `exit-info` dump.
++/// Pull the **most recent** `reason=3 (LOW_MEMORY)` record out of an `exit-info` dump.
+ ///
+ /// The layout on S25 (`docs/modules/mem.md`):
+ ///
+@@ -427,39 +447,35 @@
+ /// importance=400 pss=0.00 rss=103MB state=empty trace=null
+ /// ```
+ ///
+-/// `pss` reads `0.00` once the process is gone, so `rss` is the only usable size. Records are
+-/// grouped per package, so the *last* match is the newest entry of the last package in the dump,
+-/// which is what the caller wants to show ("who was killed most recently").
+-pub fn parse_last_low_memory(text: &str) -> Option<Value> {
++/// The dump is grouped per package, so the *last* match in the text is just the last package listed,
++/// not the latest kill: "who was killed most recently" has to be decided by the timestamps. They are
++/// fixed-width (`YYYY-MM-DD HH:MM:SS.mmm`), so comparing them as text compares them as times. A
++/// record without a readable timestamp loses to any record that has one; among equals the later
++/// line wins, which keeps the answer deterministic. `pss` reads `0.00` once the process is gone, so
++/// `rss` is the only usable size.
++pub fn parse_newest_low_memory(text: &str) -> Option<Value> {
+     let lines: Vec<&str> = text.lines().collect();
+-    let index = lines
+-        .iter()
+-        .rposition(|line| line.contains("reason=3 (LOW_MEMORY)"))?;
+-
+-    let mut record = Map::new();
+-    record.insert("package".into(), json!(field(lines[index], "process=")?));
+-
+-    // The header line with the timestamp sits one to three lines above the `process=` line.
+-    for back in 1..=3 {
+-        let Some(line) = index.checked_sub(back).and_then(|at| lines.get(at)) else {
+-            break;
+-        };
+-        if !line.contains("timestamp=") {
++    let mut newest: Option<(String, usize)> = None;
++    for (index, line) in lines.iter().enumerate() {
++        if !line.contains("reason=3 (LOW_MEMORY)") {
+             continue;
+         }
+-        if let Some(rest) = line.split("timestamp=").nth(1) {
+-            let mut parts = rest.split_whitespace();
+-            let date = parts.next().unwrap_or("");
+-            let time = parts.next().unwrap_or("");
+-            if !date.is_empty() {
+-                let stamp = format!("{date} {time}").trim().to_string();
+-                record.insert("timestamp".into(), json!(stamp));
+-            }
++        let stamp = record_timestamp(&lines, index).unwrap_or_default();
++        if newest.as_ref().is_none_or(|(seen, _)| stamp >= *seen) {
++            newest = Some((stamp, index));
+         }
+-        if let Some(uid) = field(line, "packageUid=") {
++    }
++    let (stamp, index) = newest?;
++
++    let mut record = Map::new();
++    record.insert("package".into(), json!(field(lines[index], "process=")?));
++    if !stamp.is_empty() {
++        record.insert("timestamp".into(), json!(stamp));
++    }
++    if let Some(header) = timestamp_line(&lines, index) {
++        if let Some(uid) = field(header, "packageUid=") {
+             record.insert("package_uid".into(), json!(uid));
+         }
+-        break;
+     }
+ 
+     // The `importance=… pss=… rss=…` line follows immediately.
+@@ -475,6 +491,23 @@
+     Some(Value::Object(record))
+ }
+ 
++/// The header line of the record whose `process=` line is at `index`: one to three lines above it.
++fn timestamp_line<'a>(lines: &[&'a str], index: usize) -> Option<&'a str> {
++    (1..=3)
++        .filter_map(|back| index.checked_sub(back).and_then(|at| lines.get(at)))
++        .find(|line| line.contains("timestamp="))
++        .copied()
++}
++
++/// `2026-11-23 23:26:09.526` from that header line.
++fn record_timestamp(lines: &[&str], index: usize) -> Option<String> {
++    let header = timestamp_line(lines, index)?;
++    let mut parts = header.split("timestamp=").nth(1)?.split_whitespace();
++    let date = parts.next()?;
++    let time = parts.next().unwrap_or("");
++    Some(format!("{date} {time}").trim().to_string())
++}
++
+ /// `key=value` from a whitespace-separated dump line.
+ fn field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
+     let start = line.find(key)? + key.len();
+diff -ruN a/core/sysflow-modules/src/mem/mod.rs b/core/sysflow-modules/src/mem/mod.rs
+--- a/core/sysflow-modules/src/mem/mod.rs	2026-11-25 18:22:30.000000000 +0000
++++ b/core/sysflow-modules/src/mem/mod.rs	2026-11-25 12:05:58.563656960 +0000
+@@ -82,6 +82,33 @@
+         );
+     }
+ 
++    /// [`Module::drift`] with the clock passed in, so the repair guard can be tested tick by tick.
++    fn drift_at(&self, settings: &Map<String, Value>, now: u64) -> Result<Vec<String>> {
++        if settings.is_empty() {
++            return Ok(Vec::new());
++        }
++        let specs = tunables::specs(&self.fs);
++        let mut drifted = Vec::new();
++        for (id, want) in settings {
++            let Some(spec) = specs.iter().find(|spec| spec.id == id) else {
++                continue;
++            };
++            let Ok(live) = self.fs.read_i64(spec.path) else {
++                continue;
++            };
++            if Some(live) == want.as_i64() {
++                self.guard.cleared(spec.id);
++                continue;
++            }
++            match self.guard.check(spec.id, now) {
++                tunables::Decision::Repair => drifted.push(id.clone()),
++                tunables::Decision::Suppressed => {}
++                tunables::Decision::JustSuppressed => self.emit_contested(spec.id, live),
++            }
++        }
++        Ok(drifted)
++    }
++
+     /// Test hook: attach an event store so the pressure events can be asserted.
+     #[cfg(test)]
+     pub fn with_events(mut self, events: EventStore) -> Self {
+@@ -152,30 +179,7 @@
+     /// keeps winning: after `MAX_REPAIRS` repairs inside `WINDOW_S`, the item is left alone for
+     /// `SUPPRESS_S` and the user is told once, instead of the daemon rewriting it every tick.
+     fn drift(&self, settings: &Map<String, Value>) -> Result<Vec<String>> {
+-        if settings.is_empty() {
+-            return Ok(Vec::new());
+-        }
+-        let now = sysflow_core::history::now_secs();
+-        let specs = tunables::specs(&self.fs);
+-        let mut drifted = Vec::new();
+-        for (id, want) in settings {
+-            let Some(spec) = specs.iter().find(|spec| spec.id == id) else {
+-                continue;
+-            };
+-            let Ok(live) = self.fs.read_i64(spec.path) else {
+-                continue;
+-            };
+-            if Some(live) == want.as_i64() {
+-                self.guard.cleared(spec.id);
+-                continue;
+-            }
+-            match self.guard.check(spec.id, now) {
+-                tunables::Decision::Repair => drifted.push(id.clone()),
+-                tunables::Decision::Repairing | tunables::Decision::Suppressed => {}
+-                tunables::Decision::JustSuppressed => self.emit_contested(spec.id, live),
+-            }
+-        }
+-        Ok(drifted)
++        self.drift_at(settings, sysflow_core::history::now_secs())
+     }
+ 
+     fn sanitize_boot(&self, req: &Map<String, Value>) -> Map<String, Value> {
+diff -ruN a/core/sysflow-modules/src/mem/tests.rs b/core/sysflow-modules/src/mem/tests.rs
+--- a/core/sysflow-modules/src/mem/tests.rs	2026-11-25 18:33:10.000000000 +0000
++++ b/core/sysflow-modules/src/mem/tests.rs	2026-11-25 12:06:50.996206874 +0000
+@@ -1370,6 +1370,8 @@
+     assert_eq!(events[0].event_type, "mem_oom_kill");
+     assert_eq!(events[0].severity, "notice");
+     assert_eq!(events[0].metadata["psi_full_pct"], serde_json::json!(0));
++    // The page words the event as "N processes", so the count must travel with it.
++    assert_eq!(events[0].metadata["count"], serde_json::json!(1));
+ }
+ 
+ // ---- exit-info parsing ---------------------------------------------------------------------
+@@ -1386,22 +1388,152 @@
+ ";
+ 
+ #[test]
+-fn the_newest_low_memory_record_is_parsed() {
+-    let record = history::parse_last_low_memory(EXIT_INFO_TEXT).expect("a record");
+-    assert_eq!(record["package"], serde_json::json!("com.example.newest"));
++fn the_newest_low_memory_record_is_chosen_by_timestamp_not_by_position() {
++    let record = history::parse_newest_low_memory(EXIT_INFO_TEXT).expect("a record");
++    // `com.example.last` is listed first but was killed at 23:26, after the 22:47 record below it.
++    assert_eq!(record["package"], serde_json::json!("com.example.last"));
+     assert_eq!(
+         record["timestamp"],
+-        serde_json::json!("2026-11-23 22:47:05.034")
++        serde_json::json!("2026-11-23 23:26:09.526")
+     );
+-    assert_eq!(record["package_uid"], serde_json::json!("10123"));
+-    assert_eq!(record["rss"], serde_json::json!("87MB"));
++    assert_eq!(record["package_uid"], serde_json::json!("1000"));
++    assert_eq!(record["rss"], serde_json::json!("103MB"));
++}
++
++#[test]
++fn the_order_of_the_dump_does_not_change_the_answer() {
++    // The same two records with their order swapped: grouping per package is not chronological.
++    let mut blocks: Vec<&str> = EXIT_INFO_TEXT
++        .split("        ApplicationExitInfo")
++        .collect();
++    blocks.reverse();
++    let swapped = blocks.join("        ApplicationExitInfo");
++    let record = history::parse_newest_low_memory(&swapped).expect("a record");
++    assert_eq!(record["package"], serde_json::json!("com.example.last"));
++}
++
++#[test]
++fn a_record_without_a_timestamp_loses_to_one_that_has_it() {
++    let text = "\
++        ApplicationExitInfo #1:
++          process=com.example.undated reason=3 (LOW_MEMORY) subreason=0 (UNKNOWN) status=0
++          importance=400 pss=0.00 rss=10MB state=empty trace=null
++        ApplicationExitInfo #2:
++          timestamp=2026-11-20 01:00:00.000 pid=1 realUid=1000 packageUid=10200 definingUid=10200 user=0
++          process=com.example.dated reason=3 (LOW_MEMORY) subreason=0 (UNKNOWN) status=0
++          importance=400 pss=0.00 rss=20MB state=empty trace=null
++        ApplicationExitInfo #3:
++          process=com.example.undated2 reason=3 (LOW_MEMORY) subreason=0 (UNKNOWN) status=0
++          importance=400 pss=0.00 rss=30MB state=empty trace=null
++";
++    let record = history::parse_newest_low_memory(text).expect("a record");
++    assert_eq!(record["package"], serde_json::json!("com.example.dated"));
++    assert_eq!(record["package_uid"], serde_json::json!("10200"));
+ }
+ 
+ #[test]
+ fn a_dump_without_low_memory_records_yields_nothing() {
+-    assert!(history::parse_last_low_memory("").is_none());
+-    assert!(history::parse_last_low_memory(
++    assert!(history::parse_newest_low_memory("").is_none());
++    assert!(history::parse_newest_low_memory(
+         "  process=com.example reason=4 (USER_REQUESTED) status=0\n"
+     )
+     .is_none());
+ }
++
++// ---- repair guard --------------------------------------------------------------------------
++
++const SWAP_ID: &str = "mem.swappiness";
++
++#[test]
++fn a_mismatch_that_never_clears_is_retried_every_tick_and_then_given_up() {
++    use tunables::Decision::*;
++    let guard = tunables::Guard::default();
++    // The value never comes back between ticks (the write is refused, or reverted within the tick):
++    // the old design answered "already repairing" forever and never reported anything.
++    assert_eq!(guard.check(SWAP_ID, 1_000), Repair);
++    assert_eq!(guard.check(SWAP_ID, 1_010), Repair);
++    assert_eq!(guard.check(SWAP_ID, 1_020), JustSuppressed);
++    assert_eq!(guard.check(SWAP_ID, 1_030), Suppressed);
++    assert_eq!(
++        guard.check(SWAP_ID, 1_020 + tunables::SUPPRESS_S - 1),
++        Suppressed
++    );
++    // After the quiet period the item gets a fresh budget.
++    assert_eq!(guard.check(SWAP_ID, 1_020 + tunables::SUPPRESS_S), Repair);
++}
++
++#[test]
++fn the_two_calls_inside_one_tick_cost_one_attempt() {
++    use tunables::Decision::*;
++    let guard = tunables::Guard::default();
++    // Before the repair, and again right after it to see what is left.
++    assert_eq!(guard.check(SWAP_ID, 2_000), Repair);
++    assert_eq!(guard.check(SWAP_ID, 2_000), Repair);
++    assert_eq!(guard.check(SWAP_ID, 2_001), Repair);
++    // Only the next tick is a second attempt, so a third tick is still needed to give up.
++    assert_eq!(guard.check(SWAP_ID, 2_010), Repair);
++    assert_eq!(guard.check(SWAP_ID, 2_020), JustSuppressed);
++}
++
++#[test]
++fn attempts_older_than_the_window_are_forgotten() {
++    use tunables::Decision::*;
++    let guard = tunables::Guard::default();
++    assert_eq!(guard.check(SWAP_ID, 0), Repair);
++    guard.cleared(SWAP_ID);
++    assert_eq!(guard.check(SWAP_ID, 100), Repair);
++    guard.cleared(SWAP_ID);
++    // Two attempts, but both are older than the window by now: this is a fresh problem, not the
++    // third strike.
++    let later = 100 + tunables::WINDOW_S + 1;
++    assert_eq!(guard.check(SWAP_ID, later), Repair);
++}
++
++#[test]
++fn clearing_makes_the_next_mismatch_a_new_observation() {
++    use tunables::Decision::*;
++    let guard = tunables::Guard::default();
++    assert_eq!(guard.check(SWAP_ID, 3_000), Repair);
++    guard.cleared(SWAP_ID);
++    // Same second, but the value was fine in between: that is a second episode.
++    assert_eq!(guard.check(SWAP_ID, 3_000), Repair);
++    guard.cleared(SWAP_ID);
++    assert_eq!(guard.check(SWAP_ID, 3_000), JustSuppressed);
++}
++
++#[test]
++fn a_value_that_cannot_be_repaired_is_reported_instead_of_retried_forever() {
++    let tree = Tree::new();
++    let store = EventStore::new(&tree.root);
++    let module = tree.module_with_state().with_events(store);
++    let settings = serde_json::json!({"mem.swappiness": 130})
++        .as_object()
++        .unwrap()
++        .clone();
++    // The fixture sits at 100 and nothing ever fixes it.
++    assert_eq!(module.drift_at(&settings, 5_000).unwrap(), vec![SWAP_ID]);
++    // The residual check right after the repair is the same tick: still drifted, not "repaired".
++    assert_eq!(module.drift_at(&settings, 5_000).unwrap(), vec![SWAP_ID]);
++    assert_eq!(module.drift_at(&settings, 5_010).unwrap(), vec![SWAP_ID]);
++    assert!(module.drift_at(&settings, 5_020).unwrap().is_empty());
++    assert!(module.drift_at(&settings, 5_030).unwrap().is_empty());
++
++    let events = mem_events(&tree);
++    assert_eq!(events.len(), 1);
++    assert_eq!(events[0].event_type, "mem_setting_contested");
++    assert_eq!(events[0].metadata["live"], serde_json::json!(100));
++}
++
++// ---- elapsed time --------------------------------------------------------------------------
++
++#[test]
++fn rates_use_the_boot_clock_so_a_wall_clock_jump_cannot_distort_them() {
++    let tree = Tree::new();
++    sample_at(&tree, 1_000_000);
++    // 3 s of `full` stall in 300 s of real time, but the wall clock jumped an hour (a time resync).
++    tree.put("proc/uptime", "1300.00 2000.00\n");
++    set_psi(&tree, 123_456 + 3_000_000, 65_432 + 3_000_000);
++    let second = sample_at(&tree, 1_003_600).expect("a sample");
++    // 3 s / 300 s = 1 %, not 3 s / 3600 s = 0.08 %.
++    assert_eq!(second["psi_full_pct"], serde_json::json!(100));
++}
+diff -ruN a/core/sysflow-modules/src/mem/tunables.rs b/core/sysflow-modules/src/mem/tunables.rs
+--- a/core/sysflow-modules/src/mem/tunables.rs	2026-11-25 18:21:32.000000000 +0000
++++ b/core/sysflow-modules/src/mem/tunables.rs	2026-11-25 12:05:58.562950379 +0000
+@@ -154,18 +154,28 @@
+ pub enum Decision {
+     /// Repair it now.
+     Repair,
+-    /// Already known to be mismatched; the repair from the previous tick is still running.
+-    Repairing,
+     /// The item is being undone by something else: do not touch it.
+     Suppressed,
+     /// This call is the one that gave up; the caller should say so once.
+     JustSuppressed,
+ }
+ 
++/// Calls closer together than this are one observation, not two.
++///
++/// The enforcement loop asks about every item **twice per tick**: once to find what drifted, and
++/// again right after the repair to see what is still wrong. Counting both would burn the repair
++/// budget twice as fast, and treating the second as "already being repaired" (the previous design)
++/// made a value that the repair could not fix stay wrong forever without ever being reported. The
++/// shortest guard interval is 2 s, so two seconds separates ticks from the two calls inside one.
++pub const TICK_GAP_S: u64 = 2;
++
+ #[derive(Debug, Default, Clone)]
+ struct Watch {
++    /// When repairs were attempted, oldest first, trimmed to [`WINDOW_S`].
+     attempts: Vec<u64>,
+-    pending: bool,
++    /// The second at which the current mismatch was first answered with [`Decision::Repair`].
++    /// `None` once the value matched again, so the next mismatch is always a fresh observation.
++    answered_at: Option<u64>,
+     suppressed_until: u64,
+ }
+ 
+@@ -173,6 +183,11 @@
+ ///
+ /// Kept in memory: it exists to stop a tight repair loop, and a daemon restart is exactly the moment
+ /// where one fresh attempt is reasonable.
++///
++/// Each *tick* that finds the item mismatched counts as one attempt, whether the value went back in
++/// between (something resets it every few minutes) or never did (the write is refused, or reverted
++/// within the tick). Either way, [`MAX_REPAIRS`] attempts inside [`WINDOW_S`] means this is a fight
++/// that repairing will not win.
+ #[derive(Debug, Default)]
+ pub struct Guard {
+     inner: Mutex<BTreeMap<&'static str, Watch>>,
+@@ -185,31 +200,32 @@
+         if now < watch.suppressed_until {
+             return Decision::Suppressed;
+         }
+-        // A repair we already asked for: the daemon will see the new value on the next tick, so this
+-        // tick must not count as another failure.
+-        if watch.pending {
+-            return Decision::Repairing;
++        // Same tick as an answer already given: repeat it without spending another attempt.
++        if let Some(at) = watch.answered_at {
++            if now.saturating_sub(at) < TICK_GAP_S {
++                return Decision::Repair;
++            }
+         }
+         watch
+             .attempts
+             .retain(|at| now.saturating_sub(*at) <= WINDOW_S);
+         watch.attempts.push(now);
+-        watch.pending = true;
+         if watch.attempts.len() >= MAX_REPAIRS {
+             watch.suppressed_until = now.saturating_add(SUPPRESS_S);
+             watch.attempts.clear();
+-            watch.pending = false;
++            watch.answered_at = None;
+             Decision::JustSuppressed
+         } else {
++            watch.answered_at = Some(now);
+             Decision::Repair
+         }
+     }
+ 
+-    /// The value matches the persisted intent again: the next mismatch is a new episode.
++    /// The value matches the persisted intent again: the next mismatch is a new observation.
+     pub fn cleared(&self, id: &'static str) {
+         let mut map = self.inner.lock().unwrap_or_else(|error| error.into_inner());
+         if let Some(watch) = map.get_mut(id) {
+-            watch.pending = false;
++            watch.answered_at = None;
+         }
+     }
+ }
+diff -ruN a/docs/mem-module-plan.md b/docs/mem-module-plan.md
+--- a/docs/mem-module-plan.md	2026-11-25 19:53:32.000000000 +0000
++++ b/docs/mem-module-plan.md	2026-11-25 12:08:17.082142171 +0000
+@@ -160,6 +160,21 @@
+ | 79 | 文案 | 排行下方注明「按 UID 汇总，点一行看单应用明细；进程级列表与强制停止属于进程模块」，把边界写在产品里，而不是只写在文档里 |
+ | 80 | 验证 | `:app:testDebugUnitTest`、`:app:assembleDebug` 通过 |
+ 
++**修订 16**（2026-11-25，项目负责人复审：对照 S25 探针结论与协议逐项审读代码，修 6 处 Rust、1 处 APK）：
++
++| # | 类型 | 变化 |
++|---|---|---|
++| 81 | 纠错 | **`Guard` 的 `pending` 会让修不好的值永远不被报告**：守护循环每个 tick 会对每项调两次 `drift`（先找漂移，修完再查残留）。旧逻辑把第二次当成"正在修复"，于是一个写入被拒绝、或被 ROM 在同一 tick 内改回的值，下一个 tick 起一直答 `Repairing`——既不再修、也不累计、也不发 `mem_setting_contested`，还会让 `enforce` 把没修好的项当作 `drift_repaired`。改为**按 tick 计次**：同一 tick（< 2 s）内的重复询问不额外计数，每个发现仍不一致的 tick 算一次尝试，30 分钟内 3 次即停手并报告；值恢复一致后下一次不一致重新算一次观察。`Decision::Repairing` 随之删除 |
++| 82 | 纠错 | **`mem_pressure_high` 附带的「最近一次 LOW_MEMORY」不是最近的**：`exit-info` 按包名分组，旧实现取的是文件里**最后一条**，只是"最后列出的那个包"。改为按 `timestamp=`（定宽 `YYYY-MM-DD HH:MM:SS.mmm`，字典序即时间序）取**最新**一条；无时间戳的记录败给有时间戳的。`parse_last_low_memory` 改名 `parse_newest_low_memory`；原测试的断言恰好把错误行为固化了（`com.example.newest` 的时间戳 22:47 比 `com.example.last` 的 23:26 更早），已更正并补乱序用例 |
++| 83 | 缺口 | `mem_oom_kill` 事件文案读 `metadata.count`，但生产者没写这个字段，页面永远走兜底文案。现在写入 |
++| 84 | 缺口 | APK `EventCopy.kt` 没有 `mem_setting_contested` 的文案（会直接显示英文原文）。补中文标签与说明（「系统反复把 swappiness 改回 100，已暂停重新应用 6 小时」） |
++| 85 | 纠错 | 历史差分的**经过时间改用开机时钟**（`/proc/uptime` 的差），仅在拿不到时回退到墙钟。墙钟会在手机校时时跳变，用它做分母会让 PSI 占比和 swap 速率错一个无法被下游发现的倍数 |
++| 86 | 缺口 | `with_exit_info` 只在事件确实会被记录（有事件库）时才 shell 出去，避免无事件库的构造（测试、纯采样）也跑一次 `dumpsys` |
++| 87 | 纠错 | `mem apps` 的 `cmd package list` 回退没有超时（直接 `spawn` + `wait_with_output`），包管理服务卡住会拖死整个排行。改为复用 `batterystats::read_package_uids()`（8 s 超时），并删掉重复的解析代码 |
++| 88 | 验证 | 新增 10 项 Rust 测试（`Guard` 4 项 + 模块级"修不好的值"1 项 + exit-info 乱序 / 无时间戳 + 开机时钟差分 + oom `count`）；全量 `cargo test --workspace`（201 项 mem 所在 crate）、`clippy -D warnings`、新增文件 `rustfmt --check` 通过；假根端到端：`set` → 持久化并记下默认 130 → ROM 改回后 `check` 报漂移、`enforce` 修复 |
++
++**仍未验证 / 需要真机**（Kotlin 在本环境无法编译，这一轮只改了 `EventCopy.kt`，请跑 `:app:assembleDebug`）：`mem_setting_contested` 的实际触发需要 ROM 真的在改写 `swappiness`（S25 上 48 小时观察没有），所以这条路径目前只有单元测试覆盖。
++
+ ## 目标
+ 
+ - 让用户看懂"这台设备的内存到底紧不紧"：可用量、swap/zRAM、PSI 压力、谁在占。
+diff -ruN a/docs/protocol.md b/docs/protocol.md
+--- a/docs/protocol.md	2026-11-25 19:19:34.000000000 +0000
++++ b/docs/protocol.md	2026-11-25 12:08:23.252283570 +0000
+@@ -783,7 +783,9 @@
+   request never leaves the device half-applied.
+ - **Read back.** `applied` is the kernel's answer, not the request; `mismatch` lists what it refused.
+ - **Drift is repaired, but not forever.** When the persisted value and the live value disagree, the
+-  daemon writes it back. After **3 repairs of the same item within 30 minutes** SysFlow stops and
++  daemon writes it back. Every tick that still finds the item wrong counts as one repair attempt
++  (asking twice inside one tick does not count twice, and it does not matter whether the value went
++  back in between or never did). After **3 attempts on the same item within 30 minutes** SysFlow stops and
+   leaves it alone for **6 hours**, emitting `mem_setting_contested` (category `settings`) once, with
+   `{item, live, window_s, suppress_s}` in `metadata`. Losing a fight silently is worse than saying so.
+ - **Boot replay is sanitised.** A persisted value this kernel cannot accept (different kernel, edited
+@@ -846,7 +848,9 @@
+ - **Averages, not peaks.** A difference keeps the *total* stall time of the interval but reports its
+   *average* intensity. A 2 s `full` stall inside 300 s shows up as ~0.67 %, not as the 2 s burst
+   it was. Clients must describe the series as "stall time in this interval", never as a peak.
+-- **Real elapsed time.** Rates divide by the measured time since the previous sample, not by 300 s.
++- **Real elapsed time.** Rates divide by the measured time since the previous sample, not by 300 s,
++  and that time is taken from the boot clock (`/proc/uptime`) so a wall-clock resync cannot distort
++  it; the wall clock is only the fallback when `/proc/uptime` is unavailable.
+   An interval longer than three nominal intervals (device was asleep) is still recorded but never
+   raises events.
+ - **No sample after a rebaseline.** After a reboot (boot id change, uptime or counter regression) the
+@@ -876,10 +880,12 @@
+ The thresholds are **placeholders**, kept as constants in the module: they were chosen as ≈ 6× the
+ device's long-run mean (`0.52 %` on S25) and will be replaced once a quiet-window measurement exists.
+ 
+-`metadata` carries `available_kb`, `psi_full_pct`, `psi_full_avg60` and `swap_used_kb`. The display
++`metadata` carries `available_kb`, `psi_full_pct`, `psi_full_avg60` and `swap_used_kb`; `mem_oom_kill`
++adds `count` (kills since the previous sample). The display
+ state is not known to the module — `history` records it per sample instead (§3.9). `mem_pressure_high`
+ also tries to attach `last_low_memory_exit` (`package`, `timestamp`, `package_uid`, `rss`) parsed from
+-`dumpsys activity exit-info`; that is the only place a sample shells out, it happens only when the
++`dumpsys activity exit-info` — the record with the **newest timestamp**, not the last one in the dump
++(the dump is grouped per package, so its order is not chronological); that is the only place a sample shells out, it happens only when the
+ event fires, and a failure simply omits the field.
+ `/proc/vmstat`'s `oom_kill` counts **kernel** OOM only; Android's `lmkd` kills are not guaranteed to
+ appear in it, so `mem_oom_kill` never claims "an app was killed".

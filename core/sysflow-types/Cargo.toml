@@ -1,0 +1,9 @@
+[package]
+name = "sysflow-types"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "gen-types"
+path = "src/main.rs"

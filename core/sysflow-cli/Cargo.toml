@@ -1,0 +1,15 @@
+[package]
+name = "sysflow-cli"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "sysflow"
+path = "src/main.rs"
+
+[dependencies]
+sysflow-core.workspace = true
+sysflow-modules.workspace = true
+serde_json.workspace = true
+clap.workspace = true

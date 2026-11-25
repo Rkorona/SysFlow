@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#f5f8f6" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#101513" media="(prefers-color-scheme: dark)" />
+    <title>SysFlow · 模块控制台</title>
+    <link rel="stylesheet" href="app.css" />
+  </head>
+  <body>
+    <main class="console">
+      <header class="console__head">
+        <div>
+          <span class="console__eyebrow">SYSFLOW / MODULE CONSOLE</span>
+          <h1>模块控制台</h1>
+        </div>
+        <span class="pill" id="version-pill">—</span>
+      </header>
+
+      <p class="console__hint">
+        这里只提供状态、安全模式、恢复默认与诊断。CPU、电池等调参请使用 SysFlow APK。
+      </p>
+
+      <div id="banners" class="banners" hidden></div>
+
+      <section class="card">
+        <h2>运行状态</h2>
+        <dl class="rows" id="status-rows">
+          <div><dt>协议版本</dt><dd>—</dd></div>
+        </dl>
+        <ul class="modules" id="module-list" hidden></ul>
+      </section>
+
+      <section class="card">
+        <h2>救援操作</h2>
+        <div class="actions">
+          <button type="button" class="btn btn--tonal" id="btn-safe" disabled>退出安全模式</button>
+          <button type="button" class="btn btn--tonal" id="btn-check">诊断检查</button>
+          <button type="button" class="btn btn--tonal" id="btn-log">查看日志</button>
+          <button type="button" class="btn btn--danger" id="btn-reset">恢复默认设置</button>
+        </div>
+
+        <div class="confirm" id="confirm-reset" hidden>
+          <p>将把所有模块的设置恢复为默认快照，并清除已保存的调参。确定继续？</p>
+          <div class="actions">
+            <button type="button" class="btn" id="btn-reset-cancel">取消</button>
+            <button type="button" class="btn btn--danger" id="btn-reset-confirm">确认恢复</button>
+          </div>
+        </div>
+
+        <p class="console__busy" id="busy" hidden></p>
+      </section>
+
+      <section class="card" id="check-card" hidden>
+        <h2>诊断结果</h2>
+        <dl class="rows" id="check-rows"></dl>
+      </section>
+
+      <section class="card" id="log-card" hidden>
+        <h2 id="log-title">模块日志</h2>
+        <pre class="log" id="log-body"></pre>
+      </section>
+
+      <footer class="console__foot">
+        <button type="button" class="btn" id="btn-refresh">刷新状态</button>
+      </footer>
+    </main>
+
+    <script src="app.js"></script>
+  </body>
+</html>
