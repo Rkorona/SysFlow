@@ -1038,6 +1038,156 @@ direction the cut fell. Expect a few hundred milliseconds; results are cached 60
   counts shared pages fractionally per process, and kernel / GPU / vendor pools are not app memory.
   Clients show this as its own layer, next to the physical composition rather than inside it.
 
+### 3.25 Process module (`process ...`)
+
+> **Status: Draft — Step 0 contract of `docs/process-module-plan.md`; not implemented yet.** The
+> command and field *semantics* below are frozen (per-core CPU %, protection rejection, no
+> persistence); the exact field set may grow after the Step 1 device probe. Nothing in this section
+> may be treated as device-verified until `docs/modules/process.md` is filled in.
+
+The module id is `process` (not `proc`). It is **verb-only**: no schema items, excluded from
+`snapshot` (`in_snapshot == false`), no `apply` / `drift` / boot replay, no history sampling. The
+only writes are one-shot actions on a running process; none of them touch `config.json`.
+
+#### `process list`
+
+```sh
+sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|system]
+                     [--query TEXT] [--sample-ms 500] [--no-foreground]
+```
+
+```json
+{"v":1,"ok":true,"data":{
+  "available":true,"generated_at":1795605540,"sample_ms":500,"clock_ticks":100,
+  "total":742,"returned":2,"truncated":true,"skipped":2,
+  "foreground":{"available":true,"source":"dumpsys","package":"com.android.settings","pid":8123},
+  "processes":[
+    {"pid":8123,"ppid":701,"uid":10123,"user":0,"app_id":10123,
+     "package":"com.android.settings","name":"com.android.settings",
+     "cmdline":"com.android.settings","state":"S","threads":42,
+     "rss_kb":182344,"cpu_pct":12.5,"cpu_ticks":63,
+     "oom_score_adj":0,"cgroup":"/uid_10123/pid_8123",
+     "foreground":true,"system":false,"protected":false}
+  ]}}
+```
+
+- **Two passes.** The first pass reads `/proc/<pid>/{stat,status,cmdline,oom_score_adj,cgroup}`; after
+  `sample_ms` the second pass re-reads **only `stat`** for the CPU delta. A process that vanished, or
+  whose `starttime` changed (PID reuse), gets `cpu_pct:null` and `cpu_ticks:null`.
+- **`cpu_pct` is per-core** (one decimal, 0–100 × cores; a process busy on four cores may read 400).
+- `uid` / `user` / `app_id`: `app_id = uid % 100000`, `user = uid / 100000`. `package` is `null` when
+  no package owns the UID (kernel threads, native daemons); `name` falls back to `Name:` then `pid N`.
+- `foreground` is true for **every process of the foreground package**; the top-level
+  `foreground.pid` is the resumed activity's process. With `--no-foreground` (or a failed `dumpsys`)
+  `available` is `false` and `source` is `"none"`.
+- `limit` defaults to 50 and is clamped to 1..200. Sorting is applied **before** truncation; `truncated`
+  says more rows exist. `--filter system` = `uid < 10000`; `query` is a case-insensitive substring of
+  package or name. `skipped` counts processes that could not be read (exit mid-scan, SELinux).
+- The result is **not cached**; only the foreground lookup (5 s) and the UID→package map (10 min) are.
+
+#### `process get <pid>`
+
+```json
+{"v":1,"ok":true,"data":{
+  "available":true,"pid":8123,"ppid":701,"uid":10123,"user":0,"app_id":10123,
+  "package":"com.android.settings","packages":["com.android.settings"],
+  "name":"com.android.settings","cmdline":["com.android.settings"],
+  "state":"S","threads":42,"rss_kb":182344,"pss_kb":96400,"swap_pss_kb":0,
+  "cpu_pct":12.5,"cpu_ticks":63,"sample_ms":500,
+  "oom_score_adj":0,"nice":0,"rt_priority":0,"policy":0,
+  "cgroup":"/uid_10123/pid_8123","cpuset":"top-app","start_time_ticks":123456789,
+  "foreground":true,"system":false,"protected":false}}
+```
+
+- `get` accepts a **PID only**; package lookup goes through `list --query`. A process that exits while
+  being read returns `invalid_arg` with `detail.gone:true` instead of a half-filled object.
+- `pss_kb` / `swap_pss_kb` come from one `smaps_rollup` read and are omitted when unreadable (the row
+  keeps `rss_kb`). `nice` / `rt_priority` / `policy` are the scheduler fields from `/proc/<pid>/stat`.
+
+#### `process stop <pid|package> [--user N]`
+
+```json
+{"v":1,"ok":true,"data":{
+  "package":"com.example.app","user":0,
+  "pids_before":[23123,23124],"pids_after":[],"verified":true,"already_stopped":false}}
+```
+
+A PID target is resolved to its package first: `am` has no stable per-PID force-stop. The package is
+validated (`[A-Za-z0-9._]+`) and passed as an **argument**, never through a shell. The command then
+polls for up to 2 s; `verified:false` means `am` returned success but processes survive. A package with
+no running process skips `am` and reports `already_stopped:true`.
+
+#### `process oom <pid|package> <adjustment>`
+
+```json
+{"v":1,"ok":true,"data":{
+  "target":"com.example.app","adjustment":-1000,
+  "targets":[{"pid":23123,"before":0,"applied":-1000,"verified":true}]}}
+```
+
+Range `-1000..=1000`. `oom_score_adj` is written per PID and read back; a package expands to all its
+processes and is rejected **as a whole** if any expanded PID is protected. High risk, not persisted;
+ActivityManager may reset it on the next state change.
+
+#### `process renice <pid|package> <nice>`
+
+```json
+{"v":1,"ok":true,"data":{
+  "target":"com.example.app","nice":-5,
+  "targets":[{"pid":23123,"before":0,"applied":-5,"verified":true}]}}
+```
+
+Range `-20..=19`. Executes `renice -n <nice> -p <pid>` and reads `nice` back from `/proc/<pid>/stat`.
+When the command is unavailable the feature is not advertised and the verb returns `unsupported`.
+
+#### `process cpuset <pid|package> <group>` (experimental)
+
+```json
+{"v":1,"ok":true,"data":{
+  "group":"restricted","persisted":false,
+  "targets":[{"pid":23123,"before":"top-app","applied":"restricted","verified":true}],
+  "note":"ActivityManager may move the process back on its next state change"}}
+```
+
+Advertised when a `/dev/cpuset/<group>/tasks` node exists; writability is verified immediately before
+the first write, because a cheap `probe()` cannot prove what SELinux will allow later. Moves each PID
+of the target
+into an **existing** group; never creates or deletes groups. One-shot and not persisted.
+
+#### `process freeze <pid|package>` / `process unfreeze <pid|package>` (experimental)
+
+```json
+{"v":1,"ok":true,"data":{
+  "frozen":true,"mechanism":"cgroup-v2",
+  "targets":[{"pid":23123,"before":0,"applied":1,"verified":true}]}}
+```
+
+Mechanism is probed: cgroup v2 `cgroup.freeze` first, then `am freeze` / `am unfreeze` when present;
+if neither exists the feature is not advertised. High risk, hidden behind the experimental section,
+not persisted (a reboot thaws everything).
+
+#### Protection and errors
+
+Protected targets are rejected with:
+
+```json
+{"v":1,"ok":false,"error":{
+  "code":"invalid_arg","msg":"uid 1000 (system) is protected",
+  "detail":{"protected":true,"reason":"uid < 10000"}}}
+```
+
+The check order is: `pid ≤ 2` → kernel thread → `uid < 10000` → package denylist → SysFlow itself
+(`docs/process-module-plan.md`〈保护名单〉). Protection is evaluated against the **current** process
+state, and a package action whose expansion contains any protected PID is rejected without writing
+anything. A vanished target is `invalid_arg` with `detail.gone:true`; an out-of-range value is
+`invalid_arg` with `detail.range:[min,max]`.
+
+#### `caps` features
+
+Free-form strings owned by the module: `list`, `foreground`, `stop`, `oom_score_adj`, `renice`,
+`cpuset`, `freeze`. Clients must treat an absent feature as "hide the control", exactly as for other
+modules. `supported:false` with a `reason` hides the whole module.
+
 ## 4. Generated client types
 
 `core/sysflow-types` is the Rust source of truth for the wire model. Regenerate the client model

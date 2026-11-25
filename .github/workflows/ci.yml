@@ -22,7 +22,6 @@ jobs:
         run: |
           tools/gen-types.sh
           git diff --exit-code -- \
-            webui/src/generated/protocol.ts \
             app/src/main/kotlin/io/sysflow/core/model/Protocol.kt
 
   module-scripts:
@@ -30,20 +29,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: for f in module/*.sh tools/*.sh; do sh -n "$f"; done
-
-  webui:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: webui/package-lock.json
-      - run: npm ci
-        working-directory: webui
-      - run: npm run build
-        working-directory: webui
 
   android-app:
     runs-on: ubuntu-latest
@@ -66,16 +51,9 @@ jobs:
 
   android-binary:
     runs-on: ubuntu-latest
-    needs: [rust, module-scripts, webui]
+    needs: [rust, module-scripts]
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: webui/package-lock.json
-      - run: npm ci && npm run build
-        working-directory: webui
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-linux-android

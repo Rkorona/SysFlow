@@ -5,6 +5,7 @@ pub mod battery;
 pub mod cpu;
 pub mod mem;
 pub mod mock;
+pub mod process;
 pub mod wakelock;
 
 use sysflow_core::ctx::Ctx;
@@ -27,6 +28,7 @@ pub fn builtin(ctx: &Ctx) -> Vec<Box<dyn Module>> {
             ctx.sysfs.clone(),
             ctx.data_dir.join("state"),
         )),
+        Box::new(process::ProcessModule::new(ctx.sysfs.clone())),
     ];
     if std::env::var("SYSFLOW_MOCK")
         .map(|s| s == "1")

@@ -6,6 +6,7 @@ mod battery_health;
 mod mem_apps;
 mod mem_breakdown;
 mod mem_probe;
+mod process_probe;
 mod wakelock_apps;
 mod wakelock_held;
 mod wakelock_wakeup;
@@ -304,6 +305,8 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
         }
         // Hidden developer diagnostic: raw readings + the module's judgement; not in the protocol.
         "probe" if module == "mem" => mem_probe::run(reg),
+        // Hidden Step 1 diagnostic for the process module (device path matrix).
+        "probe" if module == "process" => process_probe::run(reg),
         "health" if module == "battery" => battery_health::run(reg, rest.contains(&"--refresh")),
         "apps" if module == "battery" => {
             let limit = flag_value(rest, "--limit")

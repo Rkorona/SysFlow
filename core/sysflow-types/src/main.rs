@@ -5,7 +5,10 @@
 //! the three ends from drifting.
 //!
 //! Usage:
-//!   cargo run -p sysflow-types -- --ts <file> --kotlin <file>
+//!   cargo run -p sysflow-types -- --kotlin <file>            # APK (current)
+//!   cargo run -p sysflow-types -- --ts <file> --kotlin <file> # both, e.g. a future typed client
+//!
+//! Either output may be requested alone; asking for neither is a usage error.
 
 use std::fmt::Write as _;
 use std::fs;
@@ -253,7 +256,7 @@ fn main() {
             "--ts" => ts_path = args.next().map(PathBuf::from),
             "--kotlin" => kotlin_path = args.next().map(PathBuf::from),
             "-h" | "--help" => {
-                println!("usage: gen-types --ts <file.ts> --kotlin <file.kt>");
+                println!("usage: gen-types [--ts <file.ts>] [--kotlin <file.kt>]");
                 return;
             }
             other => {
@@ -262,17 +265,21 @@ fn main() {
             }
         }
     }
-    let (Some(ts_path), Some(kotlin_path)) = (ts_path, kotlin_path) else {
-        eprintln!("usage: gen-types --ts <file.ts> --kotlin <file.kt>");
+    if ts_path.is_none() && kotlin_path.is_none() {
+        eprintln!("usage: gen-types [--ts <file.ts>] [--kotlin <file.kt>]");
         std::process::exit(2);
-    };
-    if let Err(e) = write_file(&ts_path, &typescript()) {
-        eprintln!("{}: {e}", ts_path.display());
-        std::process::exit(1);
     }
-    if let Err(e) = write_file(&kotlin_path, &kotlin()) {
-        eprintln!("{}: {e}", kotlin_path.display());
-        std::process::exit(1);
+    if let Some(path) = &ts_path {
+        if let Err(e) = write_file(path, &typescript()) {
+            eprintln!("{}: {e}", path.display());
+            std::process::exit(1);
+        }
+    }
+    if let Some(path) = &kotlin_path {
+        if let Err(e) = write_file(path, &kotlin()) {
+            eprintln!("{}: {e}", path.display());
+            std::process::exit(1);
+        }
     }
 }
 
