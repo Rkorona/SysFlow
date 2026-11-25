@@ -6,6 +6,9 @@ mod battery_health;
 mod mem_apps;
 mod mem_breakdown;
 mod mem_probe;
+mod process_actions;
+mod process_get;
+mod process_list;
 mod process_probe;
 mod wakelock_apps;
 mod wakelock_held;
@@ -233,6 +236,16 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
         .ok_or_else(|| Error::invalid_arg("missing verb (schema | get | set | reset)"))?;
     let rest = &args[2..];
     match verb {
+        // The process module is verb-only: `get` must not fall through to the generic item reader,
+        // which has no schema items to validate a PID against.
+        "list" if module == "process" => process_list::run(reg, rest),
+        "get" if module == "process" => process_get::run(reg, rest),
+        "stop" if module == "process" => process_actions::stop(reg, rest),
+        "oom" if module == "process" => process_actions::oom(reg, rest),
+        "renice" if module == "process" => process_actions::renice(reg, rest),
+        "cpuset" if module == "process" => process_actions::cpuset(reg, rest),
+        "freeze" if module == "process" => process_actions::freeze(reg, rest, true),
+        "unfreeze" if module == "process" => process_actions::freeze(reg, rest, false),
         "schema" => reg.schema(module),
         "get" => {
             let keys: Option<Vec<String>> = flag_value(rest, "--keys").map(|s| {

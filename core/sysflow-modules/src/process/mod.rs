@@ -13,6 +13,12 @@
 //! Steps 2–4. Keeping the module registered from the start means `caps` already tells the client
 //! whether this device can support the page at all.
 
+pub mod actions;
+pub mod foreground;
+pub mod model;
+pub mod packages;
+pub mod scan;
+
 use serde_json::{json, Map, Value};
 
 use sysflow_core::error::{Error, Result};
@@ -35,33 +41,50 @@ impl ProcessModule {
         self.fs.exists("/proc/self/stat") && self.fs.exists("/proc/self/status")
     }
 
-    /// At least one existing cgroup group has a writable `tasks` node (`/dev/cpuset/<group>/tasks`).
+    fn is_dir(&self, path: &str) -> bool {
+        std::fs::metadata(self.fs.resolve(path))
+            .map(|meta| meta.is_dir())
+            .unwrap_or(false)
+    }
+
+    /// At least one real group directory has a `tasks` node (`/dev/cpuset/<group>/tasks`).
+    ///
+    /// The top of `/dev/cpuset` also holds `cpus`, `tasks`, `cgroup.procs`, … so existence alone is
+    /// not enough: a file named `tasks` at the root must not be mistaken for a group.
     fn cpuset_available(&self) -> bool {
         let Ok(groups) = self.fs.list_dir("/dev/cpuset") else {
             return false;
         };
-        groups
-            .iter()
-            .any(|group| self.fs.exists(&format!("/dev/cpuset/{group}/tasks")))
+        groups.iter().any(|group| {
+            let dir = format!("/dev/cpuset/{group}");
+            self.is_dir(&dir) && self.fs.exists(&format!("{dir}/tasks"))
+        })
     }
 
-    /// Android 12+ cgroup v2 freezer: `/sys/fs/cgroup/uid_<uid>/pid_<pid>/cgroup.freeze`.
+    /// cgroup freezer, probed cheaply.
     ///
-    /// Bounded scan (8 UIDs × 4 PIDs): `probe()` runs on every `caps` call, so it must stay cheap.
+    /// Android 12+ puts the freeze switch at `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze`
+    /// (the S25 unified cgroup path is `/apps/uid_10157/pid_12225`); some builds use the older
+    /// `/sys/fs/cgroup/uid_*` layout, and Android 11 exposes `/dev/freezer`. `am freeze` is the
+    /// runtime fallback, but `probe()` must not fork, so it is not used for detection.
+    ///
+    /// Bounded scan (2 roots × 8 UIDs × 4 PIDs): `probe()` runs on every `caps` call.
     fn freezer_available(&self) -> bool {
-        let Ok(entries) = self.fs.list_dir("/sys/fs/cgroup") else {
-            return false;
-        };
-        for uid in entries.iter().filter(|e| e.starts_with("uid_")).take(8) {
-            let Ok(pids) = self.fs.list_dir(&format!("/sys/fs/cgroup/{uid}")) else {
+        if self.fs.exists("/dev/freezer") {
+            return true;
+        }
+        for root in ["/sys/fs/cgroup/apps", "/sys/fs/cgroup"] {
+            let Ok(entries) = self.fs.list_dir(root) else {
                 continue;
             };
-            for pid in pids.iter().filter(|e| e.starts_with("pid_")).take(4) {
-                if self
-                    .fs
-                    .exists(&format!("/sys/fs/cgroup/{uid}/{pid}/cgroup.freeze"))
-                {
-                    return true;
+            for uid in entries.iter().filter(|e| e.starts_with("uid_")).take(8) {
+                let Ok(pids) = self.fs.list_dir(&format!("{root}/{uid}")) else {
+                    continue;
+                };
+                for pid in pids.iter().filter(|e| e.starts_with("pid_")).take(4) {
+                    if self.fs.exists(&format!("{root}/{uid}/{pid}/cgroup.freeze")) {
+                        return true;
+                    }
                 }
             }
         }

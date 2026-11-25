@@ -1,7 +1,7 @@
 # 进程模块（M4）开发计划
 
-> 状态：**Step 0 契约冻结（2026-11-25）**。本文件冻结 M4 的模块 id、命令面、保护名单与动作语义；
-> 实现从 Step 1 真机探针开始，未验证的行为不写进协议正文（协议 §3.25 标注 Draft）。
+> 状态：**Step 0–5 主机完成（2026-11-25）**：契约、S25 探针、只读面、动作、实验动作与 APK 页面代码均已落地；APK 由用户构建，真机写路径与验收待跑。
+> 修订 2 记录了真机推翻的三个假设（sysconf、renice 增量、freezer 路径）；未验证的行为仍不写进协议正文（§3.25 Draft）。
 >
 > 关联：`docs/development-plan.md` §7.5（功能设计）与 §12 阶段 4（里程碑）、
 > `docs/protocol.md` §3.25（本模块草案）、`docs/modules/process.md`（路径矩阵，Step 1 回填）、
@@ -22,6 +22,18 @@
 | 7 | 剪裁 | `chrt` 不进 v1（niche、与 EAS/HAL 调频冲突）；应用级 cpuset 与 freezer 只做**探测到才出现**的实验动作 |
 | 8 | 剪裁 | 进程模块不提供进程历史、不按 UID 聚合 PSS（`mem apps` / `mem breakdown` 已覆盖），不迁移 CPU 模块的 `cpu.cpuset.*` |
 | 9 | 明确 | Step 9（zRAM 重配）重估结论：**继续暂缓**，不作为 M4 依赖；理由见〈待定问题〉#10 |
+
+**修订 2**（Step 1 真机探针，S25 2026-11-25，`/sdcard/process-probe.json`）：
+
+| # | 类型 | 变化 |
+|---|---|---|
+| 10 | 实测 | `/proc` 在 su 域**全量可读**：1198 进程、0 不可读、首遍 28 ms；`list` 预算无需压缩 |
+| 11 | 纠错 | `sysconf` 在 bionic 上不可用（`_SC_CLK_TCK` 返回 2048、`_SC_PAGESIZE` 返回 1）；时钟改读 `/proc/self/auxv` 的 `AT_CLKTCK`(17) |
+| 12 | 纠错 | toybox `renice -n` 是**增量**而不是绝对值；改用 `setpriority(2)` 设绝对值，`renice` 只做回退 |
+| 13 | 缺口 | freezer 不在 `/sys/fs/cgroup/uid_*`，v2 统一路径是 `/apps/uid_<uid>/pid_<pid>/`；`am help` 有 `freeze` → Step 4 按这两条实现 |
+| 14 | 实测 | cgroup **v1** cpuset 有 13 个组、`tasks` 可写；`/dev/cpuset` 顶层混有普通文件，组发现必须过滤目录 |
+| 15 | 实测 | 前台行是 `topResumedActivity=ActivityRecord{… u0 <pkg>/<activity> …}`，解析器已验证；`packages.list` 698 行 / 10 列 |
+| 16 | 实测 | `comm` 截断到 15 字符（`.wallpaper.live`）→ 名称优先取 `cmdline`；SELinux `Enforcing`，写路径未验证 |
 
 ## 目标
 
@@ -68,7 +80,10 @@
 | 列表默认 | `--limit 50`（上限 200）、按 CPU 降序、包含系统进程 | 与用户"谁在占 CPU"的第一问题对齐；limit 上限防止一行几百个包拖慢 UI |
 | CPU% 口径 | 单核百分比（0–100 × 逻辑核数），可 >100 | 与 `top` 一致；"占整机百分比"会让多核设备上所有值都显得很小 |
 | 采样窗口 | 默认 500 ms，范围 200–2000 ms（`--sample-ms`） | 500 ms 对 2 s 轮询足够；窗口可调是给真机上"太慢/太抖"留的旋钮 |
-| 时钟 | `CLK_TCK` 用 `extern "C" { fn sysconf(i32) -> i64; }` 取 `_SC_CLK_TCK`，回退 100 | 不引入 `libc` 依赖；Android arm64 上恒为 100，但取实际值比写死稳 |
+| 时钟 | `CLK_TCK` 取 `/proc/self/auxv` 的 `AT_CLKTCK`(17)，回退 100 | 真机 `sysconf(2)` 返回 2048、`sysconf(30)` 返回 1：bionic 的常量编号与 glibc 不同，不能沿用 `sysconf` |
+| renice 实现 | `setpriority(2)` 设绝对值；`renice` 只作回退，且 `-n` 按"目标 − 当前"传增量 | 真机 toybox 0.8.13 的 `renice -n` 是增量，直接传目标值会得到错误结果 |
+| freezer 机制 | 先试 `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze`，再试 `am freeze` / `am unfreeze` | 真机 v2 统一路径是 `/apps/uid_…/pid_…`，且 `am help` 列出 freeze |
+| cpuset 组发现 | 只把 `/dev/cpuset/<dir>/tasks` 存在且为**目录**的项当组 | 真机 `/dev/cpuset` 顶层同时有 `cpus` / `tasks` / `cgroup.procs` 等普通文件 |
 | 进程身份 | `stat` 的 `starttime`（字段 22）用于跨两次采样识别 PID 复用 | 只比 PID 会在快速重启时把别的进程的 CPU 算进来 |
 | RSS | `/proc/<pid>/status` 的 `VmRSS`（kB） | 与 `mem apps` 同源；`statm` 给页数，还要再取页大小，多一步且易错 |
 | UID | `/proc/<pid>/status` 的 `Uid:` 行 | 目录 owner 在假根测试树里不可控；`status` 对 fixture 友好，且一次读顺带拿到 RSS |
@@ -186,9 +201,9 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 }}
 ```
 
-- 范围 `-20..=19`；调用 `renice -n <nice> -p <pid>`（toybox），读回 `/proc/<pid>/stat` 的 nice 字段。
-- 包目标同上：展开 + 全量保护检查。`renice` 不存在（极老 ROM）时模块 `features` 里不报
-  `renice`，verb 返回 `unsupported`。
+- 范围 `-20..=19`；优先 `setpriority(2)` 写绝对值，失败时回退 `renice -n (目标 − 当前) -p <pid>`
+  （toybox 的 `-n` 是增量）；读回 `/proc/<pid>/stat` 的 nice 字段。
+- 包目标同上：展开 + 全量保护检查。`setpriority` 与 `renice` 都不可用时 verb 返回 `unsupported`。
 
 ### `sysflow process cpuset <pid|package> <group>`（实验）
 
@@ -294,8 +309,8 @@ Step 1 的产出物；`docs/modules/process.md` 的矩阵据此回填。
 | PSS / SwapPss | `/proc/<pid>/smaps_rollup` | 省略 `pss_kb` / `swap_pss_kb`，保留 `rss_kb` |
 | nice / policy | `/proc/<pid>/stat` | 省略 |
 | cpuset 写 | `/dev/cpuset/<group>/tasks` | 无该组 → 不报 `cpuset`；写入被拒（SELinux/perm）→ 该动作 `io`/`permission`，不部分执行 |
-| freezer | cgroup v2 `cgroup.freeze` / `am freeze` | 两者都不可用 → 不报 `freeze` |
-| renice | `renice -n -p`（toybox） | 命令不存在 → 不报 `renice` |
+| freezer | `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze`，回退 `am freeze` / `am unfreeze` | 两者都不可用 → 不报 `freeze` |
+| renice | 主 `setpriority(2)`；回退 `renice -n (目标−当前) -p` | 命令不存在且系统调用失败 → 动作报 `permission` / `io`；机制存在仍报 `renice` |
 | force-stop | `am force-stop --user` | `am` 不可用（极罕见）→ `unsupported` |
 
 ## 动作契约
@@ -348,7 +363,7 @@ Step 1 的产出物；`docs/modules/process.md` 的矩阵据此回填。
 
 | 路径 | 目标 | 说明 |
 |---|---|---|
-| 扫描 800 个进程（第一遍） | < 60 ms | 每进程 4 次小文件读；假根 800 进程列入测试 |
+| 扫描 1198 个进程（第一遍） | < 60 ms | 每进程 4 次小文件读；真机实测 28 ms；假根 800 进程列入测试 |
 | 第二遍（仅 `stat`） | < 25 ms | 800 次读 |
 | dumpsys 前台 | < 400 ms | 3 s 超时；5 s 缓存 |
 | `list` 冷路径（默认参数） | < 600 ms | 500 ms 窗口 + 扫描 + 前台（缓存命中时 < 250 ms） |
@@ -367,10 +382,10 @@ APK 每 2 s 轮询时使用 `--sample-ms 300 --limit 80`（页面滚动到底再
 |---|---|---|---|---|---|
 | 0 | 契约冻结 | 本文件 + 协议 §3.25 草案 + `docs/modules/process.md` 骨架 + `development-plan.md` §7.5 / §12 状态更新 | 评审通过 id / verb / 保护名单 / 字段口径 | — | 0.5 d |
 | 1 | 真机探针 | 隐藏 `process probe`（**已在主机实现并通过测试，真机待跑**）；回填路径矩阵：`/proc` 可读性、`CLK_TCK`、dumpsys 前台行格式、包名映射、`/dev/cpuset` 组、freezer 路径、`am`/`renice` 可用性、800 进程计时 | 矩阵中每个"待验证"都有结论；据此裁剪实验动作 | 0 | 1 d |
-| 2 | 只读面 | `ProcessModule` 的 `probe` / `caps features` / `list` / `get`；前台识别；保护分类；`in_snapshot=false` | 假根单测全绿；`snapshot` 不出现 `process`；`caps` 含 `process`；列表排序与 `top` 对拍 | 1 | 2 d |
-| 3 | 动作（medium） | `stop` / `renice` / `oom` + 保护全量拒绝 + 读回 + 日志；（若待定 #2 拍板）审计事件 | 假根与真机各验证：受保护目标被拒、读回一致、失败不改配置 | 2 | 2 d |
-| 4 | 实验动作 | `cpuset` / `freeze` / `unfreeze`，按 Step 1 探测结果决定保留哪些；feature flag 控制 | 探测不到时 verb 返回 `unsupported`、UI 隐藏；探测到时读回一致 | 3 | 1.5 d |
-| 5 | APK 进程页 | `feature/process/`（Models / ViewModel / Screen / Detail）+ 导航 / Koin 接线 + `SysFlowClient` 动词 + 确认弹窗 | `:app:assembleDebug` 通过；2 s 轮询离开即停；保护行按钮置灰 | 2、3 | 2.5 d |
+| 2 | 只读面 | `ProcessModule` 的 `probe` / `caps features` / `list` / `get`；前台识别；保护分类；`in_snapshot=false` | ✅ 主机完成：`model` / `scan` / `foreground` / `packages` + 35 项 process 测试；假根 `list`/`get` 通过；真机排序对拍待跑 | 1 | 2 d |
+| 3 | 动作（medium） | `stop` / `renice` / `oom` + 保护全量拒绝 + 读回 + 日志 | ✅ 主机完成：保护/范围/读回假根测试通过；`renice` 走 `setpriority(2)`、toybox 仅回退；真机写路径待验 | 2 | 2 d |
+| 4 | 实验动作 | `cpuset` / `freeze` / `unfreeze`，按 Step 1 探测结果决定保留哪些；feature flag 控制 | ✅ 主机完成：cgroup v2 `apps/` 叶子 + `am` 回退两条路径；真机 freezer 叶子与写入待验 | 3 | 1.5 d |
+| 5 | APK 进程页 | `feature/process/`（Models / ViewModel / Screen）+ 导航 / Koin 接线 + `SysFlowClient` 动词 + 确认弹窗 | ✅ 主机代码完成（模型单测 + 解析；页面仅进入时 2 s 轮询、保护行降级、实验区默认关闭）；APK 构建由用户执行 | 2、3 | 2.5 d |
 | 6 | 真机验收与文档回填 | 平滑度、排序对拍、保护演练、恢复演练；`docs/modules/process.md` 实测值 / 降级原因 / 计时；README 增补 | 成功标准 1–6 逐条通过 | 4、5 | 1 d |
 
 合计约 10.5 d（与 `development-plan.md` 阶段 4 的 2–3 周一致，含真机往返）。

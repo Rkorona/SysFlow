@@ -272,35 +272,45 @@ fn cpuset_section(fs: &Sysfs) -> Value {
 fn freezer_section(fs: &Sysfs) -> Value {
     let started = Instant::now();
     let mut candidates = Vec::new();
-    for uid in fs
-        .list_dir("/sys/fs/cgroup")
-        .unwrap_or_default()
-        .into_iter()
-        .filter(|entry| entry.starts_with("uid_"))
-        .take(8)
-    {
-        let Ok(pids) = fs.list_dir(&format!("/sys/fs/cgroup/{uid}")) else {
+    let roots = ["/sys/fs/cgroup/apps", "/sys/fs/cgroup"];
+    let mut roots_seen = Vec::new();
+    for root in roots {
+        if !fs.exists(root) {
+            roots_seen.push(json!({"root": root, "exists": false}));
             continue;
-        };
-        for pid in pids
+        }
+        roots_seen.push(json!({"root": root, "exists": true}));
+        for uid in fs
+            .list_dir(root)
+            .unwrap_or_default()
             .into_iter()
-            .filter(|entry| entry.starts_with("pid_"))
-            .take(4)
+            .filter(|entry| entry.starts_with("uid_"))
+            .take(8)
         {
-            let path = format!("/sys/fs/cgroup/{uid}/{pid}/cgroup.freeze");
-            if fs.exists(&path) {
-                let value = fs
-                    .read_lossy(&path)
-                    .ok()
-                    .map(|text| text.trim().to_string());
-                candidates.push(json!({"path": path, "value": value}));
+            let Ok(pids) = fs.list_dir(&format!("{root}/{uid}")) else {
+                continue;
+            };
+            for pid in pids
+                .into_iter()
+                .filter(|entry| entry.starts_with("pid_"))
+                .take(4)
+            {
+                let path = format!("{root}/{uid}/{pid}/cgroup.freeze");
+                if fs.exists(&path) {
+                    let value = fs
+                        .read_lossy(&path)
+                        .ok()
+                        .map(|text| text.trim().to_string());
+                    candidates.push(json!({"path": path, "value": value}));
+                }
             }
         }
     }
     json!({
-        "root": "/sys/fs/cgroup",
+        "roots": roots_seen,
         "candidates": candidates,
         "available": !candidates.is_empty(),
+        "v1_dev_freezer": fs.exists("/dev/freezer"),
         "scan_ms": started.elapsed().as_millis() as u64,
     })
 }

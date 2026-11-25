@@ -36,11 +36,14 @@ fun ModuleHubScreen(
     onOpenWakelock: () -> Unit = {},
     memReady: Boolean = false,
     onOpenMem: () -> Unit = {},
+    processReady: Boolean = false,
+    onOpenProcess: () -> Unit = {},
 ) {
     val cpuReady = caps.modules["cpu"]?.supported == true
     val batterySupported = batteryReady || caps.modules["battery"]?.supported == true
     val wakelockSupported = wakelockReady || caps.modules["wakelock"]?.supported == true
     val memSupported = memReady || caps.modules["mem"]?.supported == true
+    val processSupported = processReady || caps.modules["process"]?.supported == true
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 120.dp),
@@ -103,6 +106,8 @@ fun ModuleHubScreen(
                         title = "进程管理",
                         subtitle = "进程 · 资源 · 优先级",
                         icon = Icons.Rounded.Timeline,
+                        ready = processSupported,
+                        onClick = if (processSupported) onOpenProcess else null,
                     )
                     ModuleFeatureCard(
                         modifier = Modifier.weight(1f),

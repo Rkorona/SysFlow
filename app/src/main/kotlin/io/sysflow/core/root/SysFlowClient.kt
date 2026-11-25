@@ -159,6 +159,70 @@ class SysFlowClient(private val root: RootExecutor) {
     }
 
     /**
+     * Live process list (protocol §3.25). Expensive (a two-pass `/proc` scan), so it is a verb and
+     * never part of `snapshot`; the page calls it only while visible.
+     *
+     * @param sampleMs CPU sampling window, 200–2000 ms. 300 ms keeps the 2 s page poll responsive;
+     *   the pull-to-refresh path uses a longer window for a steadier number.
+     */
+    suspend fun processList(
+        limit: Int = 80,
+        sort: String = "cpu",
+        filter: String = "all",
+        query: String? = null,
+        sampleMs: Int = 300,
+        foreground: Boolean = true,
+    ): JsonObject {
+        val args = buildList {
+            add("process"); add("list")
+            add("--limit"); add(limit.coerceIn(1, 200).toString())
+            add("--sort"); add(sort)
+            add("--filter"); add(filter)
+            add("--sample-ms"); add(sampleMs.coerceIn(200, 2000).toString())
+            if (!foreground) add("--no-foreground")
+            if (!query.isNullOrBlank()) {
+                add("--query"); add(query.trim())
+            }
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
+    /** One process in detail (protocol §3.25); includes PSS and scheduler/cgroup fields. */
+    suspend fun processGet(pid: Int): JsonObject =
+        parseEnvelope<JsonObject>(run("process", "get", pid.toString())).jsonObject
+
+    /** Force-stop a package (protocol §3.25). `user` is only needed for multi-user ambiguity. */
+    suspend fun processStop(target: String, user: Int? = null): JsonObject {
+        val args = buildList {
+            add("process"); add("stop"); add(target)
+            user?.let { add("--user"); add(it.toString()) }
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
+    /** Set `oom_score_adj` (`-1000..=1000`), high risk and never persisted. */
+    suspend fun processOom(target: String, adjustment: Int): JsonObject =
+        parseEnvelope<JsonObject>(
+            run("process", "oom", target, adjustment.coerceIn(-1000, 1000).toString()),
+        ).jsonObject
+
+    /** Set nice (`-20..=19`); the module uses `setpriority(2)` first. */
+    suspend fun processRenice(target: String, nice: Int): JsonObject =
+        parseEnvelope<JsonObject>(
+            run("process", "renice", target, nice.coerceIn(-20, 19).toString()),
+        ).jsonObject
+
+    /** Move every process of the target into an existing `/dev/cpuset/<group>` (experimental). */
+    suspend fun processCpuset(target: String, group: String): JsonObject =
+        parseEnvelope<JsonObject>(run("process", "cpuset", target, group)).jsonObject
+
+    /** Freeze / unfreeze (experimental; cgroup v2 leaf first, `am freeze` as fallback). */
+    suspend fun processFreeze(target: String, frozen: Boolean): JsonObject =
+        parseEnvelope<JsonObject>(
+            run("process", if (frozen) "freeze" else "unfreeze", target),
+        ).jsonObject
+
+    /**
      * Userspace wake locks currently held (protocol §3.19).
      *
      * Expensive: it enters the Java system server through `dumpsys power`, so the module caches the

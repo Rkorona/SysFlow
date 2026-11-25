@@ -96,7 +96,7 @@ client can put in a 2 s snapshot poll.
 ### 3.1 version
 
 ```json
-{"v":1,"ok":true,"data":{"sysflow_version":"0.2.1","protocol":1,"config_version":1}}
+{"v":1,"ok":true,"data":{"sysflow_version":"0.2.2","protocol":1,"config_version":1}}
 ```
 
 `sysflow_version` is the crate version from `core/Cargo.toml`; `module/module.prop` carries the same
@@ -118,7 +118,7 @@ Android properties are empty strings; `kernel_release` is read from `uname -r`.
 
 ```json
 {"v":1,"ok":true,"data":{
-  "sysflow_version":"0.2.1","protocol":1,"safe_mode":false,
+  "sysflow_version":"0.2.2","protocol":1,"safe_mode":false,
   "modules":{
     "cpu":{"supported":true,"features":["online","max_freq","min_freq","cur_freq","clusters",
            "time_in_state","load","governor","hw_range","gpu","walt","walt_guard","mem_boost",
@@ -1040,10 +1040,10 @@ direction the cut fell. Expect a few hundred milliseconds; results are cached 60
 
 ### 3.25 Process module (`process ...`)
 
-> **Status: Draft — Step 0 contract of `docs/process-module-plan.md`; not implemented yet.** The
-> command and field *semantics* below are frozen (per-core CPU %, protection rejection, no
-> persistence); the exact field set may grow after the Step 1 device probe. Nothing in this section
-> may be treated as device-verified until `docs/modules/process.md` is filled in.
+> **Status: implemented on the host (Steps 2–4), device acceptance pending.** The read-only verbs,
+> the protection gate and the one-shot actions are covered by host tests against a fake `/proc`; the
+> reference device proved the paths (`docs/modules/process.md`). What is still unverified is the
+> write path on a real device (SELinux / AMS reactions) and the APK page.
 
 The module id is `process` (not `proc`). It is **verb-only**: no schema items, excluded from
 `snapshot` (`in_snapshot == false`), no `apply` / `drift` / boot replay, no history sampling. The
@@ -1060,14 +1060,17 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 {"v":1,"ok":true,"data":{
   "available":true,"generated_at":1795605540,"sample_ms":500,"clock_ticks":100,
   "total":742,"returned":2,"truncated":true,"skipped":2,
-  "foreground":{"available":true,"source":"dumpsys","package":"com.android.settings","pid":8123},
+  "cpuset_groups":["top-app","foreground","background"],
+  "foreground":{"available":true,"source":"dumpsys","package":"com.android.settings","pid":8123,
+                "user":0,"cached":false,"disabled":false},
   "processes":[
     {"pid":8123,"ppid":701,"uid":10123,"user":0,"app_id":10123,
      "package":"com.android.settings","name":"com.android.settings",
      "cmdline":"com.android.settings","state":"S","threads":42,
      "rss_kb":182344,"cpu_pct":12.5,"cpu_ticks":63,
      "oom_score_adj":0,"cgroup":"/uid_10123/pid_8123",
-     "foreground":true,"system":false,"protected":false}
+     "foreground":true,"system":false,"protected":false,
+     "protected_reason":null}
   ]}}
 ```
 
@@ -1078,12 +1081,18 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 - `uid` / `user` / `app_id`: `app_id = uid % 100000`, `user = uid / 100000`. `package` is `null` when
   no package owns the UID (kernel threads, native daemons); `name` falls back to `Name:` then `pid N`.
 - `foreground` is true for **every process of the foreground package**; the top-level
-  `foreground.pid` is the resumed activity's process. With `--no-foreground` (or a failed `dumpsys`)
-  `available` is `false` and `source` is `"none"`.
+  `foreground.pid` is the resumed activity's process. `cached` says the 5 s lookup cache answered,
+  `disabled` says `--no-foreground` skipped the lookup. With `--no-foreground` (or a failed
+  `dumpsys`) `available` is `false` and `source` is `"none"`.
+- `protected_reason` is present only when `protected` is true (`pid ≤ 2 is the kernel`,
+  `kernel thread`, `uid < 10000 (platform)`, `system critical package`, `sysflow itself`). Clients
+  show it next to a disabled action instead of guessing why.
 - `limit` defaults to 50 and is clamped to 1..200. Sorting is applied **before** truncation; `truncated`
   says more rows exist. `--filter system` = `uid < 10000`; `query` is a case-insensitive substring of
   package or name. `skipped` counts processes that could not be read (exit mid-scan, SELinux).
 - The result is **not cached**; only the foreground lookup (5 s) and the UID→package map (10 min) are.
+- `cpuset_groups` lists the existing `/dev/cpuset/<group>` directories that have a `tasks` node. It is
+  the option list for `process cpuset`; when empty, the cpuset action must not be offered.
 
 #### `process get <pid>`
 
@@ -1096,13 +1105,16 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
   "cpu_pct":12.5,"cpu_ticks":63,"sample_ms":500,
   "oom_score_adj":0,"nice":0,"rt_priority":0,"policy":0,
   "cgroup":"/uid_10123/pid_8123","cpuset":"top-app","start_time_ticks":123456789,
-  "foreground":true,"system":false,"protected":false}}
+  "foreground":true,"system":false,"protected":false,"protected_reason":null,
+  "clock_ticks":100}}
 ```
 
 - `get` accepts a **PID only**; package lookup goes through `list --query`. A process that exits while
   being read returns `invalid_arg` with `detail.gone:true` instead of a half-filled object.
 - `pss_kb` / `swap_pss_kb` come from one `smaps_rollup` read and are omitted when unreadable (the row
   keeps `rss_kb`). `nice` / `rt_priority` / `policy` are the scheduler fields from `/proc/<pid>/stat`.
+- `cpu_pct` here uses a fixed **200 ms** window (`sample_ms`) so opening a detail page does not pay
+  the full list window; a process that exits or is recycled during it reports `null`.
 
 #### `process stop <pid|package> [--user N]`
 
@@ -1162,9 +1174,11 @@ into an **existing** group; never creates or deletes groups. One-shot and not pe
   "targets":[{"pid":23123,"before":0,"applied":1,"verified":true}]}}
 ```
 
-Mechanism is probed: cgroup v2 `cgroup.freeze` first, then `am freeze` / `am unfreeze` when present;
-if neither exists the feature is not advertised. High risk, hidden behind the experimental section,
-not persisted (a reboot thaws everything).
+Mechanism is probed: the cgroup v2 leaf `cgroup.freeze` first, then `am freeze` / `am unfreeze` when
+present; if neither exists the feature is not advertised. `mechanism` names the path used. The
+`cgroup.*` path is verified by reading the switch back; the `am` fallback can only trust the command's
+exit status, so its targets carry `"verified": null` plus a `note` rather than a guessed `true`. High
+risk, hidden behind the experimental section, not persisted (a reboot thaws everything).
 
 #### Protection and errors
 

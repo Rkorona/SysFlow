@@ -11,6 +11,7 @@ import io.sysflow.feature.adaptive.AdaptiveViewModel
 import io.sysflow.feature.home.AppViewModel
 import io.sysflow.feature.settings.SettingsViewModel
 import io.sysflow.feature.mem.MemViewModel
+import io.sysflow.feature.process.ProcessViewModel
 import io.sysflow.feature.wakelock.WakelockViewModel
 import io.sysflow.feature.diag.DiagnosticsViewModel
 import io.sysflow.feature.cpuset.CpusetViewModel
@@ -38,6 +39,7 @@ private val appModule = module {
     viewModel { DiagnosticsViewModel(get()) }
     viewModel { WakelockViewModel(get()) }
     viewModel { MemViewModel(get()) }
+    viewModel { ProcessViewModel(get()) }
 }
 
 class SysFlowApplication : Application() {

@@ -13,10 +13,10 @@
 | 阶段 | 状态 | 说明 |
 |---|---|---|
 | 阶段 0 基础与协议 | ✅ | 基础协议、配置原子存储、安全模式与 CLI 骨架已完成；后续迭代已补齐 `event`、`recovery`、`boot`、`daemon`、`info`、`note` 等能力 |
-| 阶段 1 CPU + 事件 + 守护 + APK + 救援控制台 | ✅ | CPU 全量调节（核心、调频、GPU/DDR/LLCC/WALT/cpuset/熄屏、自适应四策略）、配置漂移守护与自适应 daemon、开放式事件期刊 + Room 只读镜像、隔离恢复与诊断；APK 功能页与静态救援控制台（`module/webroot/`）均已完成；`cargo test` 工作区通过，`./build-sysflow-module.sh` 产出模块包（当前 v0.2.1）、`:app:assembleDebug` 构建成功；真机回归验收仍在跟踪 |
+| 阶段 1 CPU + 事件 + 守护 + APK + 救援控制台 | ✅ | CPU 全量调节（核心、调频、GPU/DDR/LLCC/WALT/cpuset/熄屏、自适应四策略）、配置漂移守护与自适应 daemon、开放式事件期刊 + Room 只读镜像、隔离恢复与诊断；APK 功能页与静态救援控制台（`module/webroot/`）均已完成；`cargo test` 工作区通过，`./build-sysflow-module.sh` 产出模块包（当前 v0.2.2）、`:app:assembleDebug` 构建成功；真机回归验收仍在跟踪 |
 | 阶段 2 电池 / 唤醒锁 / 历史曲线 | ✅ | **已完成**：历史采样基础设施（daemon 内 `sample()`/`sample_interval()` 调度、`history/<module>.jsonl` 30 天 / 20 000 行、`history` 降采样与真实 `daemon_running`）；电池只读遥测、`service.sh` 事件埋点、`battery apps` 耗电排行、`battery health` 循环计数兜底、APK 电池页（会话趋势 + 24 小时曲线 + 上次充电以来掉电 + 亮屏/熄屏掉电拆分）；唤醒锁两轮全部落地（只读唤醒源表 + 24h 窗口排行 + `wakelock held`；AppOps `WAKE_LOCK` 拦截 + 白名单 + 规则持久化/开机重放 + APK 唤醒锁页 + `wakelock apps` / `wakelock wakeup` / 长持锁看门狗）；熄屏切换并入 daemon。剩余仅为真机回归验收与总览页唤醒锁卡片（纯 UI） |
 | 阶段 3 内存 | ✅ | **已实现（Step 0–8，2026-11-25）**，见 `docs/mem-module-plan.md` 与 `docs/modules/mem.md`：`mem.*` 只读遥测（meminfo / PSI / zRAM / 构成项 / MGLRU）、两个可调项（`mem.swappiness`、`mem.vfs_cache_pressure`）、`history mem` 差分序列、压力事件、`mem apps` / `mem breakdown` verb、APK 内存页与导航接入。Step 9（zRAM 重配）暂缓；真机计时、事件噪音阈值与 24 h `swappiness` 观察仍待验 |
-| 阶段 4 进程 | 🚧 | **Step 0 契约冻结 + Step 1 探针 verb 已实现（2026-11-25）**：`docs/process-module-plan.md` 冻结模块 id / verb / 保护名单 / 动作语义，协议 §3.25（Draft）与 `docs/modules/process.md` 路径矩阵骨架已落；隐藏 `sysflow process probe` 已实现并通过主机测试（`caps` 已报告 `process`，`snapshot` 不含它），真机输出待跑。`/dev/cpuset` 进程组核心绑定已随 CPU 模块先行落地，M4 不迁移它 |
+| 阶段 4 进程 | 🚧 | **Step 0–5 主机完成（2026-11-25）**：契约冻结、S25 真机探针、只读面（`list`/`get`/前台/保护）、一次性动作（`stop`/`oom`/`renice`）、实验动作（`cpuset`/`freeze`）与协议 §3.25 已落；桌机侧 `cargo fmt` / `clippy -D warnings` / 全量测试通过（process 35 项）。APK 进程页（M3E 列表 + 详情 + 确认弹窗）已写，APK 由用户自行构建；真机写路径与验收待跑 |
 | 阶段 5 储存 | ⬜ | |
 | 阶段 6 打磨与发布 | ⬜ | |
 
@@ -40,7 +40,7 @@
 - **守护进程与历史采样拆解**：阶段 1 实现 Rust daemon（模块 `service.sh` 启动独立进程，按 2–120 秒间隔执行配置漂移修复与 CPU 自适应采样）；阶段 2 已把各模块 `sample()` 调度接入该循环并写入 `history/<module>.jsonl`；熄屏检测也已并入 daemon（Rust `screen.rs`），`service.sh` 的 `screen_loop` 与 `screen-state.sh` 已删除；期间修复了两个只有真机才会暴露的检测缺陷：亮度「桶」缓存导致一次瞬时 Off 被永久缓存（亮屏却压频）、以及 `mWakefulnessChanging` 被误当作 `mWakefulness`；唤醒锁先以只读模块落地（内核唤醒源 + 24h 窗口差分在模块状态里滚动，不做逐源历史列）。
 - **APK 持久化与界面方案调整**：为支持离线浏览和筛选事件，APK 引入 **Room** 镜像数据库（而原计划用于主题/单位偏好的 DataStore 尚未引入）；UI 放弃早期泛化 `SchemaRenderer`，改为专用的 CPU 核心矩阵、簇双滑块及自适应/熄屏/进程组/诊断/事件二级页。
 
-**下一步**：阶段 0–3 的代码、主机测试与构建均已就绪（模块 v0.2.1、APK debug 已出包），转入真机回归验收：重点验证 CPU 每核心利用率、adaptive 四类策略、daemon 生命周期、电池历史曲线与充电/低电事件、唤醒锁拦截与排行、内存构成条与 PSI 曲线、温控传感器、诊断和隔离恢复入口。熄屏切换已由 daemon 承担（1–5 秒轮询、`dumpsys power` 复核），采样同时记录屏幕状态，APK 电池页可给出亮屏/熄屏掉电速率。内存模块的 Step 9（zRAM 重配）重估结论为**继续暂缓**，不作为 M4 依赖。阶段 4 已进入 Step 0：契约冻结完成（`docs/process-module-plan.md`、协议 §3.25 Draft、`docs/modules/process.md` 矩阵骨架），真机回归验收与 M4 Step 1 探针可并行推进。
+**下一步**：阶段 0–3 的代码、主机测试与构建均已就绪（模块 v0.2.2、APK debug 已出包），转入真机回归验收：重点验证 CPU 每核心利用率、adaptive 四类策略、daemon 生命周期、电池历史曲线与充电/低电事件、唤醒锁拦截与排行、内存构成条与 PSI 曲线、温控传感器、诊断和隔离恢复入口。熄屏切换已由 daemon 承担（1–5 秒轮询、`dumpsys power` 复核），采样同时记录屏幕状态，APK 电池页可给出亮屏/熄屏掉电速率。内存模块的 Step 9（zRAM 重配）重估结论为**继续暂缓**，不作为 M4 依赖。阶段 4 已进入 Step 0：契约冻结完成（`docs/process-module-plan.md`、协议 §3.25 Draft、`docs/modules/process.md` 矩阵骨架），真机回归验收与 M4 Step 1 探针可并行推进。
 
 协议侧剩下的都是**类型生成**的缺口，不是文档缺口：`core/sysflow-types` 还没有 `BootStatus`，`DaemonStatus` 也只建模了 `running` / `implemented`，而 CLI 的 `daemon status` 还返回 `enabled` 与 `interval_s`（见 `docs/protocol.md` §4）。旧 `procs` / `stop-app` 不迁移，阶段 4 统一为 `process list|stop`（协议 §3.25 Draft）。
 
@@ -188,7 +188,7 @@ sysflow/
 │  ├─ mem-module-plan.md          # 内存模块交付计划与逐 Step 记录
 │  ├─ wakelock-hardening-plan.md  # 唤醒锁硬化（P0–P3）完成记录
 │  └─ modules/                    # sysfs 路径与设备差异记录（cpu.md、battery.md、wakelock.md、mem.md）
-├─ core/                          # Rust workspace（当前 version 0.2.1）
+├─ core/                          # Rust workspace（当前 version 0.2.2）
 │  ├─ Cargo.toml
 │  ├─ sysflow-core/               # trait、信封、错误码、配置与隔离恢复、事件期刊、安全模式、Sysfs、Logger、screen、history、batterystats、wakeup_sources
 │  │  └─ registry/                # daemon.rs（守护循环/采样调度/熄屏切换）、boot.rs（开机/恢复/安全模式）
@@ -216,7 +216,7 @@ sysflow/
 │  ├─ gen-types.sh                # 从 Rust 生成 Kotlin 协议类型
 │  ├─ pack-module.sh              # 打包 zip + .sha256
 │  └─ tests/                      # migrate-legacy-smoke.sh、migrate-legacy-doze-smoke.sh
-├─ dist/                          # sysflow-module-v0.2.1.zip + .sha256
+├─ dist/                          # sysflow-module-v0.2.2.zip + .sha256
 └─ .github/workflows/             # CI（待补全）
 ```
 
@@ -283,7 +283,7 @@ sysflow log [--tail 200]
 
 ```json
 {"v":1,"ok":true,"data":{
-  "sysflow_version":"0.2.1","protocol":1,"safe_mode":false,
+  "sysflow_version":"0.2.2","protocol":1,"safe_mode":false,
   "modules":{
     "cpu":{"supported":true,"features":["online","max_freq","min_freq","cur_freq","clusters",
            "time_in_state","load","governor","hw_range","gpu","walt","walt_guard","mem_boost",
@@ -1107,7 +1107,7 @@ data class ModuleUiState<T>(
 - [x] **开机恢复与旧版清理**：`boot status|configure`、`recovery status|restore|clear|clear-corrupt` 安全模式自动隔离配置、`sysflow info` / `note`、`migrate-legacy.sh` 与 `migrate-legacy-doze.sh` ✅
 - [x] **开放式事件系统**：`EventStore` + `sysflow event emit|list|prune|clear` + 系统/CPU/服务自动埋点 + APK Room v2 镜像（`sysflow-events.db`）+ APK 总览“系统动态”与“系统事件”页（救援控制台不渲染事件） ✅
 - [x] **协议类型生成与客户端对齐**：Rust `sysflow-types` 生成 Kotlin（`--ts` 能力保留但当前未使用）；APK 搭建完成（M3E 主题与对比度单测、悬浮 3-Tab 导航、Koin、libsu、总览/模块/CPU/自适应/熄屏/进程组/设置/诊断/引导页）；WebUI 已降级为模块救援控制台（状态/安全模式/恢复默认/诊断/日志），不再与 APK 功能对齐 ✅
-- [x] **阶段 1 构建**：`cargo test` 工作区通过；`./build-sysflow-module.sh` 产出模块 zip（含 SHA256，当前 v0.2.1）；`:app:assembleDebug` 出包。`sysflow-types` 已补 `DaemonStatus` 与 `HistoryData`，但 `DaemonStatus` 只建模了 `running`/`implemented`，尚无 `BootStatus`。
+- [x] **阶段 1 构建**：`cargo test` 工作区通过；`./build-sysflow-module.sh` 产出模块 zip（含 SHA256，当前 v0.2.2）；`:app:assembleDebug` 出包。`sysflow-types` 已补 `DaemonStatus` 与 `HistoryData`，但 `DaemonStatus` 只建模了 `running`/`implemented`，尚无 `BootStatus`。
 - [ ] **阶段 1 真机回归验收**：在真机验证 APK 与 WebUI 控制、重启持久化、安全模式与隔离配置恢复。`docs/protocol.md` 重复的 §3.11 已在文档层面修掉（boot/recovery/daemon 并入 §3.13）；仍欠 `BootStatus` 类型与 `DaemonStatus` 的 `enabled`/`interval_s` 字段。
 
 ### 阶段 2：电池 + 唤醒锁 + 历史曲线（约 3–4 周）
@@ -1147,8 +1147,8 @@ data class ModuleUiState<T>(
 - [ ] Step 2：只读面（列表 / 详情 / 前台识别 / 保护分类，`in_snapshot=false`）
 - [ ] Step 3：一次性动作：force-stop、renice、`oom_score_adj`（全量保护检查 + 读回）
 - [ ] Step 4：实验动作：应用级 cpuset 绑核、freezer（探测到才出现）
-- [ ] Step 5：APK 进程页（搜索/排序/过滤/详情/确认）；仅进入页面时采样
-- **验收**：列表刷新流畅（2s 周期不卡顿）；保护名单生效；误操作可恢复。
+- [x] Step 5：APK 进程页（M3E 搜索/排序/过滤/详情/确认；仅进入页面时 2 s 轮询）——主机代码完成，APK 构建由用户执行
+- **验收**：列表刷新流畅（2s 周期不卡顿）；保护名单生效；误操作可恢复。**真机项**：写路径（oom/renice/cpuset/freeze 的 SELinux 与 AMS 反应）、freezer 叶子、`am freeze` 回退、2 s 轮询流畅度。
 
 ### 阶段 5：储存（约 2 周）
 

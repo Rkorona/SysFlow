@@ -4,7 +4,7 @@ Unified system manager for rooted Android: a root **module** (Rust binary `sysfl
 enforcement/adaptive daemon and KernelSU WebUI) plus an **M3 Expressive APK** that is pure UI
 and never runs in the background.
 
-Current module version: `v0.2.1` (`module/module.prop`).
+Current module version: `v0.2.2` (`module/module.prop`).
 
 - Plan and decisions: [docs/development-plan.md](docs/development-plan.md)
 - Protocol: [docs/protocol.md](docs/protocol.md)
@@ -139,6 +139,29 @@ counter differences taken against a baseline from the same boot) and emits `mem_
 that a ROM keeps rewriting is abandoned for 6 hours after three repairs inside 30 minutes instead of
 being fought every tick. See `docs/protocol.md` §3.22–§3.24 and `docs/modules/mem.md`.
 
+## Process module
+
+`core/sysflow-modules/src/process/` is verb-only: no schema items, no `snapshot` entry, no history
+(it is already excluded via `in_snapshot() == false`). The list is a two-pass `/proc` scan (CPU% is
+**per core**, 0–100 × cores) and is only called while the APK page is visible.
+
+```sh
+sysflow process list --limit 50 --sort cpu --filter all --sample-ms 500
+sysflow process list --query com.example --no-foreground
+sysflow process get 8123                       # PSS, nice/policy, cgroup/cpuset
+sysflow process stop com.example.app           # one-shot force-stop
+sysflow process oom com.example.app 100        # oom_score_adj, high risk, not persisted
+sysflow process renice com.example.app -5      # setpriority(2), toybox renice as fallback
+sysflow process cpuset com.example.app top-app # experimental, existing group only
+sysflow process freeze com.example.app         # experimental: cgroup v2 leaf, am fallback
+```
+
+Protection is evaluated against the **current** process state: `pid ≤ 2`, kernel threads,
+`uid < 10000`, a small package denylist and SysFlow itself are refused, and a package whose
+expansion contains any protected PID is rejected as a whole. Nothing here writes `config.json`, so an
+action cannot affect boot, drift or safe mode. See `docs/protocol.md` §3.25,
+`docs/process-module-plan.md` and `docs/modules/process.md`.
+
 ## Adaptive control and enforcement
 
 The CPU page links to a dedicated adaptive-management screen with smart load tiers, thermal
@@ -216,7 +239,7 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 
 ```sh
 ./build-sysflow-module.sh
-# dist/sysflow-module-v0.2.1.zip (+ .sha256)
+# dist/sysflow-module-v0.2.2.zip (+ .sha256)
 ```
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the
