@@ -1,0 +1,1598 @@
+diff --git a/core/sysflow-modules/src/process/model.rs b/core/sysflow-modules/src/process/model.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-modules/src/process/model.rs
++++ b/core/sysflow-modules/src/process/model.rs
+@@ -46,6 +46,8 @@ pub struct Cgroup {
+     /// The cgroup v2 unified path (`0::/apps/uid_10157/pid_12225`), if present.
+     pub unified: Option<String>,
+     /// The cpuset controller path from a v1 hierarchy, if present.
+     pub cpuset: Option<String>,
++    /// The freezer controller path from a v1 hierarchy (`/dev/freezer`), if present.
++    pub freezer: Option<String>,
+ }
+ 
+ impl Cgroup {
+@@ -122,7 +124,7 @@ pub fn parse_cmdline(text: &str) -> String {
+         .to_string()
+ }
+ 
+-/// Parse `/proc/<pid>/cgroup`: the v2 unified line and any v1 `cpuset` controller line.
++/// Parse `/proc/<pid>/cgroup`: the v2 unified line and any v1 `cpuset`/`freezer` lines.
+ pub fn parse_cgroup(text: &str) -> Cgroup {
+     let mut cgroup = Cgroup::default();
+     for line in text.lines() {
+@@ -136,9 +138,13 @@ pub fn parse_cgroup(text: &str) -> Cgroup {
+         else {
+             continue;
+         };
+-        if controllers.split(',').any(|c| c == "cpuset") {
+-            cgroup.cpuset = Some(path.to_string());
++        for controller in controllers.split(',') {
++            if controller == "cpuset" {
++                cgroup.cpuset = Some(path.to_string());
++            } else if controller == "freezer" {
++                cgroup.freezer = Some(path.to_string());
++            }
+         }
+     }
+     cgroup
+ }
+@@ -171,6 +177,42 @@ pub fn parse_auxv(bytes: &[u8], key: u64) -> Option<u64> {
+     None
+ }
+ 
++/// Linux scheduling policy constants (`<linux/sched.h>`).
++pub const SCHED_OTHER: i32 = 0;
++pub const SCHED_FIFO: i32 = 1;
++pub const SCHED_RR: i32 = 2;
++pub const SCHED_BATCH: i32 = 3;
++pub const SCHED_IDLE: i32 = 5;
++
++/// Human-readable Linux scheduling policy name for `/proc/<pid>/stat` policy codes.
++pub fn sched_policy_name(policy: u32) -> &'static str {
++    match policy {
++        0 => "SCHED_OTHER",
++        1 => "SCHED_FIFO",
++        2 => "SCHED_RR",
++        3 => "SCHED_BATCH",
++        5 => "SCHED_IDLE",
++        6 => "SCHED_DEADLINE",
++        _ => "UNKNOWN",
++    }
++}
++
++/// Parse a scheduling policy name or numeric identifier (`other|fifo|rr|batch|idle`).
++pub fn parse_sched_policy(text: &str) -> Option<i32> {
++    match text.trim().to_ascii_lowercase().as_str() {
++        "0" | "other" | "normal" | "sched_other" | "sched_normal" => Some(SCHED_OTHER),
++        "1" | "fifo" | "sched_fifo" => Some(SCHED_FIFO),
++        "2" | "rr" | "sched_rr" => Some(SCHED_RR),
++        "3" | "batch" | "sched_batch" => Some(SCHED_BATCH),
++        "5" | "idle" | "sched_idle" => Some(SCHED_IDLE),
++        _ => None,
++    }
++}
++
++/// Whether `policy` is a real-time policy (`SCHED_FIFO` or `SCHED_RR`) requiring priority `1..=99`.
++pub fn is_realtime_policy(policy: i32) -> bool {
++    policy == SCHED_FIFO || policy == SCHED_RR
++}
++
+ /// Packages whose termination breaks the device badly enough that they are never offered as an
+ /// action target. UID < 10 000 already covers most platform processes; this list is the supplement
+ /// for system apps that run under an app UID. Mirrors `docs/process-module-plan.md`〈保护名单〉.
+@@ -280,10 +322,12 @@ mod tests {
+ 
+     #[test]
+     fn cgroup_reads_both_the_v2_line_and_the_v1_cpuset_controller() {
+-        let text = "5:freezer:/\n4:cpuset:/top-app\n3:cpuacct:/top-app\n2:cpu:/top-app\n1:blkio:/top\n0::/apps/uid_10157/pid_12225\n";
++        let text = "5:freezer:/bg\n4:cpuset:/top-app\n3:cpuacct:/top-app\n2:cpu:/top-app\n1:blkio:/top\n0::/apps/uid_10157/pid_12225\n";
+         let cgroup = parse_cgroup(text);
+         assert_eq!(cgroup.unified.as_deref(), Some("/apps/uid_10157/pid_12225"));
+         assert_eq!(cgroup.cpuset.as_deref(), Some("/top-app"));
++        assert_eq!(cgroup.freezer.as_deref(), Some("/bg"));
+         assert_eq!(cgroup.cpuset_group().as_deref(), Some("top-app"));
+     }
+ 
+@@ -327,4 +371,24 @@ mod tests {
+             None
+         );
+     }
++
++    #[test]
++    fn sched_policy_helpers_cover_aliases_and_names() {
++        assert_eq!(parse_sched_policy("other"), Some(SCHED_OTHER));
++        assert_eq!(parse_sched_policy("SCHED_NORMAL"), Some(SCHED_OTHER));
++        assert_eq!(parse_sched_policy("FIFO"), Some(SCHED_FIFO));
++        assert_eq!(parse_sched_policy("2"), Some(SCHED_RR));
++        assert_eq!(parse_sched_policy("batch"), Some(SCHED_BATCH));
++        assert_eq!(parse_sched_policy("idle"), Some(SCHED_IDLE));
++        assert_eq!(parse_sched_policy("deadline"), None);
++        assert!(is_realtime_policy(SCHED_FIFO));
++        assert!(is_realtime_policy(SCHED_RR));
++        assert!(!is_realtime_policy(SCHED_OTHER));
++        assert!(!is_realtime_policy(SCHED_BATCH));
++        assert!(!is_realtime_policy(SCHED_IDLE));
++        assert_eq!(sched_policy_name(0), "SCHED_OTHER");
++        assert_eq!(sched_policy_name(1), "SCHED_FIFO");
++        assert_eq!(sched_policy_name(5), "SCHED_IDLE");
++        assert_eq!(sched_policy_name(99), "UNKNOWN");
++    }
+ }
+diff --git a/core/sysflow-modules/src/process/mod.rs b/core/sysflow-modules/src/process/mod.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-modules/src/process/mod.rs
++++ b/core/sysflow-modules/src/process/mod.rs
+@@ -87,7 +87,7 @@ impl Module for ProcessModule {
+         if !self.proc_readable() {
+             return Caps::unsupported("/proc/<pid> is not readable");
+         }
+-        let mut features = vec!["list"];
++        let mut features = vec!["list", "sched"];
+         if self.fs.exists("/system/bin/dumpsys") {
+             features.push("foreground");
+         }
+@@ -127,7 +127,7 @@ impl Module for ProcessModule {
+     /// instead of pretending a `set` could work.
+     fn apply(&self, _req: &Map<String, Value>) -> Result<ApplyResult> {
+         Err(Error::invalid_arg(
+-            "process is verb-only: use `sysflow process list|get|stop|oom|renice`",
++            "process is verb-only: use `sysflow process list|get|stop|oom|renice|sched|cpuset|freeze|unfreeze`",
+         ))
+     }
+ 
+@@ -181,6 +181,7 @@ mod tests {
+             "stop",
+             "renice",
+             "oom_score_adj",
++            "sched",
+             "cpuset",
+             "freeze",
+         ] {
+diff --git a/core/sysflow-modules/src/process/scan.rs b/core/sysflow-modules/src/process/scan.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-modules/src/process/scan.rs
++++ b/core/sysflow-modules/src/process/scan.rs
+@@ -88,6 +88,7 @@ pub struct ProcessInfo {
+     pub kthread: bool,
+     pub oom_score_adj: Option<i64>,
+     pub cgroup: Option<model::Cgroup>,
++    pub frozen: Option<bool>,
+ }
+ 
+ pub(crate) fn read_stat(fs: &Sysfs, pid: u32) -> Option<model::Stat> {
+@@ -108,6 +109,7 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
+     let cgroup = fs
+         .read_lossy(&format!("/proc/{pid}/cgroup"))
+         .ok()
+         .map(|text| model::parse_cgroup(&text));
++    let frozen = read_frozen(fs, cgroup.as_ref());
+     Some(ProcessInfo {
+         pid,
+         stat,
+@@ -119,7 +121,54 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
+         kthread: status.kthread,
+         oom_score_adj,
+         cgroup,
++        frozen,
+     })
+ }
+ 
++/// Whether the process is currently frozen (`cgroup.freeze` / `cgroup.events` on cgroup v2, or
++/// `/dev/freezer/<path>/freezer.state` on cgroup v1). Returns `None` when no freezer interface
++/// is exposed for this process.
++pub(crate) fn read_frozen(fs: &Sysfs, cgroup: Option<&model::Cgroup>) -> Option<bool> {
++    let cgroup = cgroup?;
++    if let Some(unified) = cgroup.unified.as_deref() {
++        let trimmed = unified.trim_end_matches('/');
++        if !trimmed.is_empty() {
++            let base = format!("/sys/fs/cgroup{trimmed}");
++            let freeze_file = format!("{base}/cgroup.freeze");
++            let events_file = format!("{base}/cgroup.events");
++            if let Ok(raw) = fs.read_str(&freeze_file) {
++                if raw.trim() == "1" {
++                    return Some(true);
++                }
++                if let Ok(events) = fs.read_str(&events_file) {
++                    for line in events.lines() {
++                        if let Some(val) = line.strip_prefix("frozen") {
++                            return Some(val.trim() == "1");
++                        }
++                    }
++                }
++                return Some(false);
++            }
++            if let Ok(events) = fs.read_str(&events_file) {
++                for line in events.lines() {
++                    if let Some(val) = line.strip_prefix("frozen") {
++                        return Some(val.trim() == "1");
++                    }
++                }
++            }
++        }
++    }
++    if let Some(v1_path) = cgroup.freezer.as_deref() {
++        let trimmed = v1_path.trim_end_matches('/');
++        let state_file = if trimmed.is_empty() {
++            "/dev/freezer/freezer.state".to_string()
++        } else {
++            format!("/dev/freezer{trimmed}/freezer.state")
++        };
++        if let Ok(raw) = fs.read_str(&state_file) {
++            let upper = raw.trim().to_ascii_uppercase();
++            if upper == "FROZEN" || upper == "FREEZING" {
++                return Some(true);
++            }
++            if upper == "THAWED" {
++                return Some(false);
++            }
++        }
++    }
++    None
++}
++
+ /// The name a UI should show: the package for app processes, the basename for daemon paths.
+ ///
+ /// `/proc/<pid>/cmdline` is the package name for zygote children, an absolute path for native
+@@ -301,6 +350,9 @@ fn row_json(row: &Row) -> Value {
+         if let Some(group) = cgroup.cpuset_group() {
+             object.insert("cpuset".into(), json!(group));
+         }
++    }
++    if let Some(frozen) = info.frozen {
++        object.insert("frozen".into(), json!(frozen));
+     }
+     object.insert("foreground".into(), json!(row.foreground));
+     object.insert("system".into(), json!(row.system));
+@@ -445,6 +497,10 @@ fn detail_with_sample(fs: &Sysfs, data_dir: &Path, pid: u32, sample_ms: u64) ->
+     object.insert("nice".into(), json!(info.stat.nice));
+     object.insert("rt_priority".into(), json!(info.stat.rt_priority));
+     object.insert("policy".into(), json!(info.stat.policy));
++    object.insert(
++        "policy_name".into(),
++        json!(model::sched_policy_name(info.stat.policy)),
++    );
+     object.insert("start_time_ticks".into(), json!(info.stat.starttime));
+     if let Some(cgroup) = &info.cgroup {
+         object.insert(
+@@ -461,6 +517,9 @@ fn detail_with_sample(fs: &Sysfs, data_dir: &Path, pid: u32, sample_ms: u64) ->
+                 .map_or(Value::Null, |group| json!(group)),
+         );
+     }
++    if let Some(frozen) = info.frozen {
++        object.insert("frozen".into(), json!(frozen));
++    }
+     object.insert("foreground".into(), json!(foreground));
+     object.insert("system".into(), json!(system));
+     object.insert("protected".into(), json!(protected.is_some()));
+@@ -725,6 +784,7 @@ mod tests {
+         assert_eq!(out["oom_score_adj"], 100);
+         assert_eq!(out["nice"], 0);
++        assert_eq!(out["policy_name"], "SCHED_OTHER");
+         assert_eq!(out["cgroup"], "/apps/uid_10123/pid_10123");
+         assert_eq!(out["cpuset"], "top-app");
+         assert_eq!(out["cmdline"], json!(["com.example.app", "--flag"]));
+@@ -767,4 +827,48 @@ mod tests {
+             "recycled pid must not produce a percentage"
+         );
+     }
++
++    #[test]
++    fn reads_frozen_state_from_cgroup_v2_and_v1() {
++        let root = temp("frozen-state");
++        add_process(&root, 101, "com.example.v2", 10101, 1000);
++        write(
++            &root,
++            "proc/101/cgroup",
++            "0::/apps/uid_10101/pid_101\n",
++        );
++        write(
++            &root,
++            "sys/fs/cgroup/apps/uid_10101/pid_101/cgroup.freeze",
++            "1\n",
++        );
++
++        add_process(&root, 102, "com.example.events", 10102, 1000);
++        write(
++            &root,
++            "proc/102/cgroup",
++            "0::/apps/uid_10102/pid_102\n",
++        );
++        write(
++            &root,
++            "sys/fs/cgroup/apps/uid_10102/pid_102/cgroup.freeze",
++            "0\n",
++        );
++        write(
++            &root,
++            "sys/fs/cgroup/apps/uid_10102/pid_102/cgroup.events",
++            "populated 1\nfrozen 1\n",
++        );
++
++        add_process(&root, 103, "com.example.v1", 10103, 1000);
++        write(&root, "proc/103/cgroup", "5:freezer:/frozen_app\n");
++        write(&root, "dev/freezer/frozen_app/freezer.state", "THAWED\n");
++
++        let fs = Sysfs::new(&root);
++        assert_eq!(read_one(&fs, 101).unwrap().frozen, Some(true));
++        assert_eq!(read_one(&fs, 102).unwrap().frozen, Some(true));
++        assert_eq!(read_one(&fs, 103).unwrap().frozen, Some(false));
++        let detail = detail_with_sample(&fs, &root.join("state-dir"), 101, 0).unwrap();
++        assert_eq!(detail["frozen"], true);
++    }
+ }
+diff --git a/core/sysflow-modules/src/process/actions.rs b/core/sysflow-modules/src/process/actions.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-modules/src/process/actions.rs
++++ b/core/sysflow-modules/src/process/actions.rs
+@@ -1,4 +1,4 @@
+-//! One-shot process actions: `stop`, `oom`, `renice`, `cpuset`, `freeze` / `unfreeze`.
++//! One-shot process actions: `stop`, `oom`, `renice`, `sched`, `cpuset`, `freeze` / `unfreeze`.
+ //!
+ //! Every action follows the same order, and the order is the safety property:
+ //!
+@@ -16,6 +16,7 @@ use serde_json::{json, Value};
+ 
+ use sysflow_core::command;
+ use sysflow_core::error::{Error, Result};
++use sysflow_core::event::{EventStore, NewSystemEvent};
+ use sysflow_core::log::Logger;
+ use sysflow_core::sysfs::Sysfs;
+ 
+@@ -28,11 +29,17 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
+ const STOP_VERIFY: Duration = Duration::from_secs(2);
+ const CPUSET_ROOT: &str = "/dev/cpuset";
+ const FREEZE_ROOT: &str = "/sys/fs/cgroup";
++const V1_FREEZE_ROOT: &str = "/dev/freezer";
+ 
+ /// `PRIO_PROCESS` for `setpriority(2)`.
+ const PRIO_PROCESS: i32 = 0;
+ 
++#[repr(C)]
++struct SchedParam {
++    sched_priority: i32,
++}
++
+ extern "C" {
+     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
++    fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
+ }
+ 
+ #[derive(Clone, Debug, PartialEq, Eq)]
+@@ -148,6 +155,21 @@ fn log_action(data_dir: &Path, message: String) {
+     Logger::new(data_dir.join("log").join("sysflow.log")).info(&message);
+ }
+ 
++fn emit_process_event(
++    data_dir: &Path,
++    severity: &str,
++    title: impl Into<String>,
++    message: impl Into<String>,
++    metadata: Value,
++) {
++    let store = EventStore::new(data_dir);
++    let event = NewSystemEvent::new("process", "action", "process_action", severity, title)
++        .message(message)
++        .metadata(metadata);
++    // Best-effort telemetry: event store failures must never fail the process action.
++    let _ = store.emit_sanitized(event);
++}
++
+ pub fn stop(fs: &Sysfs, data_dir: &Path, target: &Target, user: Option<u32>) -> Result<Value> {
+     let resolved = resolve(fs, data_dir, target, user)?;
+     let package = match target {
+@@ -189,11 +211,33 @@ pub fn stop(fs: &Sysfs, data_dir: &Path, target: &Target, user: Option<u32>) ->
+         std::thread::sleep(Duration::from_millis(100));
+     };
+ 
++    let verified = pids_after.is_empty();
+     log_action(
+         data_dir,
+         format!(
+             "process stop package={package} user={user} before={pids_before:?} after={pids_after:?}"
+         ),
+     );
++    emit_process_event(
++        data_dir,
++        if verified { "info" } else { "warning" },
++        if verified {
++            "Process stopped"
++        } else {
++            "Process stop incomplete"
++        },
++        if verified {
++            format!("Force-stopped {package} (user {user}).")
++        } else {
++            format!("Force-stop requested for {package} (user {user}), surviving pids: {pids_after:?}.")
++        },
++        json!({
++            "action": "stop",
++            "target": package,
++            "user": user,
++            "pids_before": pids_before,
++            "pids_after": pids_after,
++            "verified": verified,
++        }),
++    );
+     Ok(json!({
+         "package": package,
+         "user": user,
+@@ -220,6 +264,25 @@ pub fn oom(fs: &Sysfs, data_dir: &Path, target: &Target, adjustment: i64) -> Res
+     let mut failure: Option<Error> = None;
+     let mut applied_count = 0;
+     for target in &resolved {
++        if !still_same_process(fs, &target.info) {
++            if failure.is_none() {
++                failure = Some(
++                    Error::invalid_arg(format!(
++                        "process {} ({}) exited or PID was reused",
++                        target.info.pid, target.info.name
++                    ))
++                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
++                );
++            }
++            targets.push(json!({
++                "pid": target.info.pid,
++                "before": target.info.oom_score_adj,
++                "applied": Value::Null,
++                "verified": false,
++                "error": "process exited or PID was reused",
++            }));
++            continue;
++        }
+         let path = format!("/proc/{}/oom_score_adj", target.info.pid);
+         let result = fs.write_str(&path, &adjustment.to_string());
+         let (applied, error) = match result {
+@@ -253,12 +316,29 @@ pub fn oom(fs: &Sysfs, data_dir: &Path, target: &Target, adjustment: i64) -> Res
+     if applied_count == 0 {
+         return Err(failure.unwrap_or_else(|| Error::io("no oom_score_adj write succeeded")));
+     }
+ 
++    let all_verified = applied_count == resolved.len();
+     log_action(
+         data_dir,
+         format!(
+             "process oom target={} adjustment={adjustment} pids={} verified={applied_count}",
+             target.text(),
+             resolved.len()
+         ),
+     );
++    emit_process_event(
++        data_dir,
++        if all_verified { "info" } else { "warning" },
++        "Process OOM adjustment updated",
++        format!(
++            "Set oom_score_adj={adjustment} for {} ({applied_count}/{} verified).",
++            target.text(),
++            resolved.len()
++        ),
++        json!({
++            "action": "oom",
++            "target": target.text(),
++            "adjustment": adjustment,
++            "applied": adjustment,
++            "verified": all_verified,
++            "pids": resolved.len(),
++        }),
++    );
+     Ok(json!({
+         "target": target.text(),
+         "adjustment": adjustment,
+@@ -299,6 +379,26 @@ pub fn renice(fs: &Sysfs, data_dir: &Path, target: &Target, nice: i64) -> Result
+     let mut failure: Option<Error> = None;
+     let mut verified_count = 0;
+     for target in &resolved {
++        if !still_same_process(fs, &target.info) {
++            if failure.is_none() {
++                failure = Some(
++                    Error::invalid_arg(format!(
++                        "process {} ({}) exited or PID was reused",
++                        target.info.pid, target.info.name
++                    ))
++                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
++                );
++            }
++            targets.push(json!({
++                "pid": target.info.pid,
++                "before": target.info.stat.nice,
++                "applied": Value::Null,
++                "verified": false,
++                "mechanism": "gone",
++                "error": "process exited or PID was reused",
++            }));
++            continue;
++        }
+         let before = target.info.stat.nice;
+         let mut mechanism = "setpriority";
+         if let Err(error) = set_priority(target.info.pid, nice as i32) {
+@@ -329,18 +429,153 @@ pub fn renice(fs: &Sysfs, data_dir: &Path, target: &Target, nice: i64) -> Result
+     if verified_count == 0 {
+         return Err(failure.unwrap_or_else(|| Error::io("no renice succeeded")));
+     }
+ 
++    let all_verified = verified_count == resolved.len();
+     log_action(
+         data_dir,
+         format!(
+             "process renice target={} nice={nice} pids={} verified={verified_count}",
+             target.text(),
+             resolved.len()
+         ),
+     );
++    emit_process_event(
++        data_dir,
++        if all_verified { "info" } else { "warning" },
++        "Process nice priority updated",
++        format!(
++            "Set nice={nice} for {} ({verified_count}/{} verified).",
++            target.text(),
++            resolved.len()
++        ),
++        json!({
++            "action": "renice",
++            "target": target.text(),
++            "nice": nice,
++            "applied": nice,
++            "verified": all_verified,
++            "pids": resolved.len(),
++        }),
++    );
+     Ok(json!({
+         "target": target.text(),
+         "nice": nice,
+         "targets": targets,
+     }))
+ }
+ 
++fn set_scheduler(pid: u32, policy: i32, priority: i32) -> std::io::Result<()> {
++    let param = SchedParam {
++        sched_priority: priority,
++    };
++    // SAFETY: `sched_setscheduler` is a standard Linux syscall taking a PID, scheduling policy
++    // integer, and valid pointer to `SchedParam`.
++    let result = unsafe { sched_setscheduler(pid as i32, policy, &param) };
++    if result == 0 {
++        Ok(())
++    } else {
++        Err(std::io::Error::last_os_error())
++    }
++}
++
++pub fn sched(
++    fs: &Sysfs,
++    data_dir: &Path,
++    target: &Target,
++    policy_name: &str,
++    priority: Option<i64>,
++) -> Result<Value> {
++    let policy = model::parse_sched_policy(policy_name).ok_or_else(|| {
++        Error::invalid_arg(format!(
++            "unknown scheduling policy: {policy_name:?}; expected other|fifo|rr|batch|idle"
++        ))
++    })?;
++    let canonical_name = model::sched_policy_name(policy as u32);
++    let rt_prio = if model::is_realtime_policy(policy) {
++        let p = priority.ok_or_else(|| {
++            Error::invalid_arg(format!("{canonical_name} requires priority within 1..=99"))
++                .with_detail(json!({"range": [1, 99]}))
++        })?;
++        if !(1..=99).contains(&p) {
++            return Err(Error::invalid_arg(format!(
++                "{canonical_name} priority must be within 1..=99"
++            ))
++            .with_detail(json!({"range": [1, 99]})));
++        }
++        p as i32
++    } else {
++        let p = priority.unwrap_or(0);
++        if p != 0 {
++            return Err(Error::invalid_arg(format!(
++                "{canonical_name} requires priority 0"
++            ))
++            .with_detail(json!({"range": [0, 0]})));
++        }
++        0
++    };
++
++    let resolved = resolve(fs, data_dir, target, None)?;
++    if resolved.is_empty() {
++        return Err(Error::invalid_arg(
++            "no running process matches this package",
++        ));
++    }
++    ensure_actionable(&resolved)?;
++
++    let mut targets = Vec::new();
++    let mut failure: Option<Error> = None;
++    let mut write_count = 0usize;
++    let mut verified_count = 0usize;
++
++    for item in &resolved {
++        let before = format!(
++            "{} ({})",
++            model::sched_policy_name(item.info.stat.policy),
++            item.info.stat.rt_priority
++        );
++        if !still_same_process(fs, &item.info) {
++            if failure.is_none() {
++                failure = Some(
++                    Error::invalid_arg(format!(
++                        "process {} ({}) exited or PID was reused",
++                        item.info.pid, item.info.name
++                    ))
++                    .with_detail(json!({"gone": true, "pid": item.info.pid})),
++                );
++            }
++            targets.push(json!({
++                "pid": item.info.pid,
++                "before": before,
++                "applied": Value::Null,
++                "verified": false,
++                "mechanism": "gone",
++                "error": "process exited or PID was reused",
++            }));
++            continue;
++        }
++        match set_scheduler(item.info.pid, policy, rt_prio) {
++            Ok(()) => {
++                write_count += 1;
++                let readback = scan::read_stat(fs, item.info.pid);
++                let verified = readback.as_ref().is_some_and(|stat| {
++                    stat.policy == policy as u32 && stat.rt_priority == rt_prio as u32
++                });
++                if verified {
++                    verified_count += 1;
++                }
++                let applied = readback.as_ref().map(|stat| {
++                    format!(
++                        "{} ({})",
++                        model::sched_policy_name(stat.policy),
++                        stat.rt_priority
++                    )
++                });
++                targets.push(json!({
++                    "pid": item.info.pid,
++                    "before": before,
++                    "applied": applied,
++                    "verified": verified,
++                    "mechanism": "sched_setscheduler",
++                }));
++            }
++            Err(error) => {
++                if failure.is_none() {
++                    let mapped = if error.raw_os_error() == Some(1) || error.raw_os_error() == Some(13) {
++                        Error::permission(format!(
++                            "cannot set scheduling policy on pid {}: {error}",
++                            item.info.pid
++                        ))
++                    } else {
++                        Error::io(format!(
++                            "cannot set scheduling policy on pid {}: {error}",
++                            item.info.pid
++                        ))
++                    };
++                    failure = Some(mapped);
++                }
++                targets.push(json!({
++                    "pid": item.info.pid,
++                    "before": before,
++                    "applied": Value::Null,
++                    "verified": false,
++                    "mechanism": "failed",
++                    "error": error.to_string(),
++                }));
++            }
++        }
++    }
++
++    if write_count == 0 {
++        return Err(failure.unwrap_or_else(|| Error::io("no scheduling policy change succeeded")));
++    }
++
++    let all_verified = verified_count == resolved.len();
++    log_action(
++        data_dir,
++        format!(
++            "process sched target={} policy={canonical_name} priority={rt_prio} pids={} verified={verified_count}",
++            target.text(),
++            resolved.len()
++        ),
++    );
++    emit_process_event(
++        data_dir,
++        if all_verified { "info" } else { "warning" },
++        "Process scheduling policy updated",
++        format!(
++            "Set {canonical_name} (priority {rt_prio}) for {} ({verified_count}/{} verified).",
++            target.text(),
++            resolved.len()
++        ),
++        json!({
++            "action": "sched",
++            "target": target.text(),
++            "policy": canonical_name,
++            "policy_id": policy,
++            "priority": rt_prio,
++            "verified": all_verified,
++            "pids": resolved.len(),
++        }),
++    );
++    Ok(json!({
++        "target": target.text(),
++        "policy": canonical_name,
++        "policy_id": policy,
++        "priority": rt_prio,
++        "persisted": false,
++        "targets": targets,
++        "note": "Scheduling policy is one-shot and may be reset by ActivityManager",
++    }))
++}
++
+ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Result<Value> {
+     let dir = format!("{CPUSET_ROOT}/{group}");
+     let valid_group = std::fs::metadata(fs.resolve(&dir))
+@@ -357,8 +592,27 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
+     ensure_actionable(&resolved)?;
+ 
+     let mut targets = Vec::new();
++    let mut write_count = 0usize;
+     let mut verified_count = 0;
++    let mut failure: Option<Error> = None;
+     for target in &resolved {
++        if !still_same_process(fs, &target.info) {
++            if failure.is_none() {
++                failure = Some(
++                    Error::invalid_arg(format!(
++                        "process {} ({}) exited or PID was reused",
++                        target.info.pid, target.info.name
++                    ))
++                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
++                );
++            }
++            targets.push(json!({
++                "pid": target.info.pid,
++                "before": target.info.cgroup.as_ref().and_then(model::Cgroup::cpuset_group),
++                "applied": Value::Null,
++                "verified": false,
++                "error": "process exited or PID was reused",
++            }));
++            continue;
++        }
+         let before = target
+             .info
+             .cgroup
+@@ -367,13 +621,15 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
+         let write = fs.write_str(&format!("{dir}/tasks"), &target.info.pid.to_string());
+         let applied = match write {
+-            Ok(()) => scan::read_one(fs, target.info.pid)
+-                .and_then(|info| info.cgroup)
+-                .and_then(|cgroup| cgroup.cpuset_group()),
++            Ok(()) => {
++                write_count += 1;
++                scan::read_one(fs, target.info.pid)
++                    .and_then(|info| info.cgroup)
++                    .and_then(|cgroup| cgroup.cpuset_group())
++            }
+             Err(e) => {
+                 return Err(Error::io(format!(
+                     "cannot move pid {} to {group}: {e}",
+                     target.info.pid
+                 )));
+             }
+         };
+@@ -387,13 +643,35 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
+             "verified": applied.as_deref() == Some(group),
+         }));
+     }
++    if write_count == 0 {
++        return Err(failure.unwrap_or_else(|| Error::io("no cpuset move succeeded")));
++    }
+ 
++    let all_verified = verified_count == resolved.len();
+     log_action(
+         data_dir,
+         format!(
+             "process cpuset target={} group={group} pids={} verified={verified_count}",
+             target.text(),
+             resolved.len()
+         ),
+     );
++    emit_process_event(
++        data_dir,
++        if all_verified { "info" } else { "warning" },
++        "Process cpuset updated",
++        format!(
++            "Moved {} to cpuset {group} ({verified_count}/{} verified).",
++            target.text(),
++            resolved.len()
++        ),
++        json!({
++            "action": "cpuset",
++            "target": target.text(),
++            "group": group,
++            "verified": all_verified,
++            "pids": resolved.len(),
++        }),
++    );
+     Ok(json!({
+         "group": group,
+         "persisted": false,
+@@ -408,6 +686,16 @@ fn freeze_path(cgroup: Option<&model::Cgroup>) -> Option<String> {
+     Some(format!("{base}/cgroup.freeze"))
+ }
+ 
++fn v1_freeze_path(cgroup: Option<&model::Cgroup>) -> Option<String> {
++    let path = cgroup?.freezer.as_deref()?;
++    let trimmed = path.trim_end_matches('/');
++    if trimmed.is_empty() {
++        Some(format!("{V1_FREEZE_ROOT}/freezer.state"))
++    } else {
++        Some(format!("{V1_FREEZE_ROOT}{trimmed}/freezer.state"))
++    }
++}
++
+ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Result<Value> {
+     let resolved = resolve(fs, data_dir, target, None)?;
+     if resolved.is_empty() {
+@@ -421,10 +709,29 @@ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Res
+     let use_cgroup = resolved.iter().all(|target| {
+         freeze_path(target.info.cgroup.as_ref()).is_some_and(|path| fs.exists(&path))
+     });
++    let action_name = if frozen { "freeze" } else { "unfreeze" };
+ 
+     if use_cgroup {
+         let mut targets = Vec::new();
++        let mut write_count = 0usize;
++        let mut verified_count = 0usize;
++        let mut failure: Option<Error> = None;
+         for target in &resolved {
++            if !still_same_process(fs, &target.info) {
++                if failure.is_none() {
++                    failure = Some(
++                        Error::invalid_arg(format!(
++                            "process {} ({}) exited or PID was reused",
++                            target.info.pid, target.info.name
++                        ))
++                        .with_detail(json!({"gone": true, "pid": target.info.pid})),
++                    );
++                }
++                targets.push(json!({
++                    "pid": target.info.pid,
++                    "before": Value::Null,
++                    "applied": Value::Null,
++                    "verified": false,
++                    "error": "process exited or PID was reused",
++                }));
++                continue;
++            }
+             let path = freeze_path(target.info.cgroup.as_ref()).expect("checked above");
+             let before = fs.read_str(&path).ok();
+             fs.write_str(&path, value)?;
++            write_count += 1;
+             let applied = fs.read_str(&path).ok();
++            let verified = applied.as_deref() == Some(value);
++            if verified {
++                verified_count += 1;
++            }
+             targets.push(json!({
+                 "pid": target.info.pid,
+                 "before": before,
+                 "applied": applied,
+-                "verified": applied.as_deref() == Some(value),
++                "verified": verified,
+             }));
+         }
++        if write_count == 0 {
++            return Err(failure.unwrap_or_else(|| Error::io("no cgroup freeze write succeeded")));
++        }
++        let all_verified = verified_count == resolved.len();
+         log_action(
+             data_dir,
+             format!(
+                 "process {} target={} mechanism=cgroup-v2 pids={}",
+-                if frozen { "freeze" } else { "unfreeze" },
++                action_name,
+                 target.text(),
+                 resolved.len()
+             ),
+         );
++        emit_process_event(
++            data_dir,
++            if all_verified { "info" } else { "warning" },
++            if frozen {
++                "Process frozen"
++            } else {
++                "Process unfrozen"
++            },
++            format!(
++                "{} {} via cgroup-v2 ({verified_count}/{} verified).",
++                if frozen { "Frozen" } else { "Unfroze" },
++                target.text(),
++                resolved.len()
++            ),
++            json!({
++                "action": action_name,
++                "target": target.text(),
++                "frozen": frozen,
++                "mechanism": "cgroup-v2",
++                "verified": all_verified,
++                "pids": resolved.len(),
++            }),
++        );
+         return Ok(json!({
+             "frozen": frozen,
+             "mechanism": "cgroup-v2",
+             "targets": targets,
+         }));
+     }
+ 
++    let use_cgroup_v1 = resolved.iter().all(|target| {
++        v1_freeze_path(target.info.cgroup.as_ref()).is_some_and(|path| fs.exists(&path))
++    });
++    if use_cgroup_v1 {
++        let v1_value = if frozen { "FROZEN" } else { "THAWED" };
++        let mut targets = Vec::new();
++        let mut write_count = 0usize;
++        let mut verified_count = 0usize;
++        let mut failure: Option<Error> = None;
++        for target in &resolved {
++            if !still_same_process(fs, &target.info) {
++                if failure.is_none() {
++                    failure = Some(
++                        Error::invalid_arg(format!(
++                            "process {} ({}) exited or PID was reused",
++                            target.info.pid, target.info.name
++                        ))
++                        .with_detail(json!({"gone": true, "pid": target.info.pid})),
++                    );
++                }
++                targets.push(json!({
++                    "pid": target.info.pid,
++                    "before": Value::Null,
++                    "applied": Value::Null,
++                    "verified": false,
++                    "error": "process exited or PID was reused",
++                }));
++                continue;
++            }
++            let path = v1_freeze_path(target.info.cgroup.as_ref()).expect("checked above");
++            let before = fs.read_str(&path).ok();
++            fs.write_str(&path, v1_value)?;
++            write_count += 1;
++            let applied = fs.read_str(&path).ok();
++            let verified = applied.as_deref().is_some_and(|state| {
++                let upper = state.trim().to_ascii_uppercase();
++                if frozen {
++                    upper == "FROZEN" || upper == "FREEZING"
++                } else {
++                    upper == "THAWED"
++                }
++            });
++            if verified {
++                verified_count += 1;
++            }
++            targets.push(json!({
++                "pid": target.info.pid,
++                "before": before,
++                "applied": applied,
++                "verified": verified,
++            }));
++        }
++        if write_count == 0 {
++            return Err(failure.unwrap_or_else(|| Error::io("no cgroup-v1 freezer write succeeded")));
++        }
++        let all_verified = verified_count == resolved.len();
++        log_action(
++            data_dir,
++            format!(
++                "process {} target={} mechanism=cgroup-v1 pids={}",
++                action_name,
++                target.text(),
++                resolved.len()
++            ),
++        );
++        emit_process_event(
++            data_dir,
++            if all_verified { "info" } else { "warning" },
++            if frozen {
++                "Process frozen"
++            } else {
++                "Process unfrozen"
++            },
++            format!(
++                "{} {} via cgroup-v1 ({verified_count}/{} verified).",
++                if frozen { "Frozen" } else { "Unfroze" },
++                target.text(),
++                resolved.len()
++            ),
++            json!({
++                "action": action_name,
++                "target": target.text(),
++                "frozen": frozen,
++                "mechanism": "cgroup-v1",
++                "verified": all_verified,
++                "pids": resolved.len(),
++            }),
++        );
++        return Ok(json!({
++            "frozen": frozen,
++            "mechanism": "cgroup-v1",
++            "targets": targets,
++        }));
++    }
++
+     // Fallback: `am freeze|unfreeze <package>`; the command's exit status is the only verifiable
+     // signal, so `verified` is null rather than a guessed `true`.
+     let package = match target {
+@@ -445,10 +812,27 @@ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Res
+     log_action(
+         data_dir,
+         format!(
+             "process {} package={package} mechanism=am",
+-            if frozen { "freeze" } else { "unfreeze" }
++            action_name
+         ),
+     );
++    emit_process_event(
++        data_dir,
++        "info",
++        if frozen {
++            "Process freeze requested"
++        } else {
++            "Process unfreeze requested"
++        },
++        format!("Requested {action_name} for {package} via am."),
++        json!({
++            "action": action_name,
++            "target": package,
++            "frozen": frozen,
++            "mechanism": "am",
++            "verified": Value::Null,
++        }),
++    );
+     Ok(json!({
+         "frozen": frozen,
+         "mechanism": "am",
+@@ -636,4 +1020,73 @@ mod tests {
+         let error = renice(&fs, &data, &Target::Pid(10123), 99).unwrap_err();
+         assert_eq!(error.code.as_str(), "invalid_arg");
+         assert_eq!(error.detail.unwrap()["range"], json!([-20, 19]));
+     }
++
++    #[test]
++    fn sched_validates_policy_priority_and_protection() {
++        let (root, data) = app_fixture("sched-validate");
++        let fs = Sysfs::new(&root);
++
++        let bad_policy = sched(&fs, &data, &Target::Pid(10123), "deadline", None).unwrap_err();
++        assert_eq!(bad_policy.code.as_str(), "invalid_arg");
++
++        let missing_prio = sched(&fs, &data, &Target::Pid(10123), "fifo", None).unwrap_err();
++        assert_eq!(missing_prio.code.as_str(), "invalid_arg");
++        assert_eq!(missing_prio.detail.unwrap()["range"], json!([1, 99]));
++
++        let bad_rt_prio = sched(&fs, &data, &Target::Pid(10123), "rr", Some(100)).unwrap_err();
++        assert_eq!(bad_rt_prio.code.as_str(), "invalid_arg");
++
++        let bad_other_prio =
++            sched(&fs, &data, &Target::Pid(10123), "other", Some(10)).unwrap_err();
++        assert_eq!(bad_other_prio.code.as_str(), "invalid_arg");
++        assert_eq!(bad_other_prio.detail.unwrap()["range"], json!([0, 0]));
++
++        add_process(&root, 1, "init", 0);
++        let protected = sched(&fs, &data, &Target::Pid(1), "fifo", Some(10)).unwrap_err();
++        assert_eq!(protected.detail.unwrap()["protected"], true);
++    }
++
++    #[test]
++    fn freeze_supports_cgroup_v1_dev_freezer() {
++        let (root, data) = app_fixture("freeze-v1");
++        write(
++            &root,
++            "proc/10123/cgroup",
++            "5:freezer:/uid_10123\n4:cpuset:/top-app\n",
++        );
++        write(
++            &root,
++            "dev/freezer/uid_10123/freezer.state",
++            "THAWED\n",
++        );
++        let fs = Sysfs::new(&root);
++        let out = freeze(&fs, &data, &Target::Pid(10123), true).unwrap();
++        assert_eq!(out["mechanism"], "cgroup-v1");
++        assert_eq!(out["targets"][0]["before"], "THAWED");
++        assert_eq!(out["targets"][0]["applied"], "FROZEN");
++        assert_eq!(out["targets"][0]["verified"], true);
++        assert_eq!(
++            std::fs::read_to_string(root.join("dev/freezer/uid_10123/freezer.state")).unwrap(),
++            "FROZEN"
++        );
++    }
++
++    #[test]
++    fn actions_emit_structured_process_events() {
++        let (root, data) = app_fixture("events");
++        let fs = Sysfs::new(&root);
++        oom(&fs, &data, &Target::Pid(10123), 300).unwrap();
++        let store = EventStore::new(&data);
++        let events = store
++            .list(sysflow_core::event::EventFilter {
++                limit: 10,
++                module: Some("process"),
++                ..Default::default()
++            })
++            .unwrap();
++        assert_eq!(events.len(), 1);
++        assert_eq!(events[0].event_type, "process_action");
++        assert_eq!(events[0].category, "action");
++        assert_eq!(events[0].metadata["action"], "oom");
++        assert_eq!(events[0].metadata["applied"], 300);
++    }
+ }
+diff --git a/core/sysflow-cli/src/process_actions.rs b/core/sysflow-cli/src/process_actions.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-cli/src/process_actions.rs
++++ b/core/sysflow-cli/src/process_actions.rs
+@@ -1,4 +1,4 @@
+-//! `sysflow process stop|oom|renice|cpuset|freeze|unfreeze` — one-shot actions.
++//! `sysflow process stop|oom|renice|sched|cpuset|freeze|unfreeze` — one-shot actions.
+ //!
+ //! The CLI only parses arguments; resolution, protection, identity re-checks and read-back all live
+ //! in `sysflow_modules::process::actions`, where they are covered by host tests.
+@@ -27,6 +27,17 @@ pub fn renice(reg: &Registry, rest: &[&str]) -> Result<Value> {
+     actions::renice(&reg.ctx().sysfs, &reg.ctx().data_dir, &target, nice)
+ }
+ 
++pub fn sched(reg: &Registry, rest: &[&str]) -> Result<Value> {
++    let args = positionals(rest);
++    let target = parse_target(args.first(), "sched")?;
++    let policy = args.get(1).ok_or_else(|| {
++        Error::invalid_arg("process sched requires a policy (other|fifo|rr|batch|idle)")
++    })?;
++    let priority = args
++        .get(2)
++        .map(|value| parse_i64(Some(value), "sched", "priority"))
++        .transpose()?;
++    actions::sched(&reg.ctx().sysfs, &reg.ctx().data_dir, &target, policy, priority)
++}
++
+ pub fn cpuset(reg: &Registry, rest: &[&str]) -> Result<Value> {
+     let args = positionals(rest);
+     let target = parse_target(args.first(), "cpuset")?;
+@@ -105,4 +116,13 @@ mod tests {
+         assert_eq!(flag(&args, "--user"), Some("10"));
+         assert_eq!(flag(&["com.example.app"], "--user"), None);
+     }
++
++    #[test]
++    fn sched_positionals_accept_policy_and_optional_priority() {
++        assert_eq!(
++            positionals(&["10123", "fifo", "10"]),
++            vec!["10123", "fifo", "10"]
++        );
++        assert_eq!(positionals(&["com.example.app", "other"]), vec!["com.example.app", "other"]);
++    }
+ }
+diff --git a/core/sysflow-cli/src/main.rs b/core/sysflow-cli/src/main.rs
+index 0000000..1111111 100644
+--- a/core/sysflow-cli/src/main.rs
++++ b/core/sysflow-cli/src/main.rs
+@@ -179,6 +179,7 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
+         "stop" if module == "process" => process_actions::stop(reg, rest),
+         "oom" if module == "process" => process_actions::oom(reg, rest),
+         "renice" if module == "process" => process_actions::renice(reg, rest),
++        "sched" if module == "process" => process_actions::sched(reg, rest),
+         "cpuset" if module == "process" => process_actions::cpuset(reg, rest),
+         "freeze" if module == "process" => process_actions::freeze(reg, rest, true),
+         "unfreeze" if module == "process" => process_actions::freeze(reg, rest, false),
+diff --git a/app/src/main/kotlin/io/sysflow/core/root/SysFlowClient.kt b/app/src/main/kotlin/io/sysflow/core/root/SysFlowClient.kt
+index 0000000..1111111 100644
+--- a/app/src/main/kotlin/io/sysflow/core/root/SysFlowClient.kt
++++ b/app/src/main/kotlin/io/sysflow/core/root/SysFlowClient.kt
+@@ -188,6 +188,15 @@ class SysFlowClient(private val root: RootExecutor) {
+             run("process", "renice", target, nice.coerceIn(-20, 19).toString()),
+         ).jsonObject
+ 
++    /** Set scheduling policy (`other|fifo|rr|batch|idle`) and optional RT priority (`1..=99`). */
++    suspend fun processSched(target: String, policy: String, priority: Int? = null): JsonObject {
++        val args = buildList {
++            add("process"); add("sched"); add(target); add(policy)
++            priority?.let { add(it.toString()) }
++        }
++        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
++    }
++
+     /** Move every process of the target into an existing `/dev/cpuset/<group>` (experimental). */
+     suspend fun processCpuset(target: String, group: String): JsonObject =
+         parseEnvelope<JsonObject>(run("process", "cpuset", target, group)).jsonObject
+diff --git a/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt b/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt
+index 0000000..1111111 100644
+--- a/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt
++++ b/app/src/main/kotlin/io/sysflow/feature/home/EventCopy.kt
+@@ -112,6 +112,7 @@ private val eventLabels = mapOf(
+     "corrupt_config_cleared" to "损坏配置已清理",
+     "recovery_restored" to "隔离配置已恢复",
+     "recovery_discarded" to "隔离配置已丢弃",
++    "process_action" to "进程操作",
+ )
+ 
+ /** Two identical records closer together than this are the same occurrence, reported twice. */
+@@ -234,6 +235,7 @@ fun activityDetail(event: SystemEventEntity): String {
+             val hours = meta.number("suppress_s")?.div(3600.0)?.roundPercent()?.takeIf { it > 0 } ?: 6L
+             "系统反复把 $name 改回$live，已暂停重新应用 $hours 小时"
+         }
++        "process_action" -> processActionDetail(meta, event.message)
+         else -> event.message
+     }
+ }
+@@ -307,3 +309,32 @@ private fun psiDetail(meta: JsonObject): String {
+     meta.number("swap_used_kb")?.div(1_048_576.0)?.roundPercent()?.let { parts.add("swap $it GB") }
+     return if (parts.isEmpty()) "" else "（${parts.joinToString("，")}）"
+ }
++
++private fun processActionDetail(meta: JsonObject, fallback: String): String {
++    val action = meta.string("action") ?: return fallback
++    val target = meta.string("target") ?: return fallback
++    val verified = (meta["verified"] as? JsonPrimitive)?.booleanOrNull
++    val suffix = if (verified == false) "（未完全生效）" else ""
++    return when (action) {
++        "stop" -> "强制停止 $target$suffix"
++        "oom" -> meta.number("applied")
++            ?.let { "调整 $target 的 oom_score_adj 为 ${it.roundPercent()}$suffix" }
++            ?: "调整 $target 的 oom_score_adj$suffix"
++        "renice" -> meta.number("applied")
++            ?.let { "调整 $target 的 nice 为 ${it.roundPercent()}$suffix" }
++            ?: "调整 $target 的 nice$suffix"
++        "sched" -> {
++            val policy = meta.string("policy") ?: "调度策略"
++            val prio = meta.number("priority")?.roundPercent()
++            if (prio != null && prio > 0) "设置 $target 为 $policy（优先级 $prio）$suffix"
++            else "设置 $target 为 $policy$suffix"
++        }
++        "cpuset" -> meta.string("group")
++            ?.let { "将 $target 移入 cpuset $it$suffix" }
++            ?: "调整 $target 的 cpuset$suffix"
++        "freeze" -> "冻结 $target$suffix"
++        "unfreeze" -> "解冻 $target$suffix"
++        else -> fallback
++    }
++}
+diff --git a/app/src/main/kotlin/io/sysflow/feature/home/EventUi.kt b/app/src/main/kotlin/io/sysflow/feature/home/EventUi.kt
+index 0000000..1111111 100644
+--- a/app/src/main/kotlin/io/sysflow/feature/home/EventUi.kt
++++ b/app/src/main/kotlin/io/sysflow/feature/home/EventUi.kt
+@@ -220,6 +220,28 @@ fun formatEventMetadata(metadataJson: String): String? {
+         mark("pid")
+         (value as? JsonPrimitive)?.longOrNull?.let { pid -> parts += "PID: $pid" }
+     }
++    obj["action"]?.let { value ->
++        mark("action")
++        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { action ->
++            parts += "动作: $action"
++        }
++    }
++    obj["target"]?.let { value ->
++        mark("target")
++        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { target ->
++            parts += "目标: $target"
++        }
++    }
++    obj["mechanism"]?.let { value ->
++        mark("mechanism")
++        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { mechanism ->
++            parts += "机制: $mechanism"
++        }
++    }
++    obj["verified"]?.let { value ->
++        mark("verified")
++        (value as? JsonPrimitive)?.booleanOrNull?.let { verified ->
++            parts += if (verified) "读回校验: 已生效" else "读回校验: 未完全生效"
++        }
++    }
+ 
+     mark("requested")
+     mark("applied")
+diff --git a/app/src/main/kotlin/io/sysflow/feature/process/ProcessModels.kt b/app/src/main/kotlin/io/sysflow/feature/process/ProcessModels.kt
+index 0000000..1111111 100644
+--- a/app/src/main/kotlin/io/sysflow/feature/process/ProcessModels.kt
++++ b/app/src/main/kotlin/io/sysflow/feature/process/ProcessModels.kt
+@@ -34,6 +34,7 @@ data class ProcessEntry(
+     val oomScoreAdj: Int?,
+     val cgroup: String?,
+     val cpuset: String?,
++    val frozen: Boolean? = null,
+     val foreground: Boolean,
+     val system: Boolean,
+     val protected: Boolean,
+@@ -86,10 +87,12 @@ data class ProcessDetail(
+     val nice: Int,
+     val rtPriority: Int,
+     val policy: Int,
++    val policyName: String? = null,
+     val cgroup: String?,
+     val cpuset: String?,
+     val startTimeTicks: Long,
++    val frozen: Boolean? = null,
+     val foreground: Boolean,
+     val system: Boolean,
+     val protected: Boolean,
+@@ -108,9 +111,13 @@ data class ProcessActionTarget(
+ )
+ 
+ data class ProcessActionResult(
++    val pkg: String?,
+     val target: String?,
+     val adjustment: Int?,
+     val nice: Int?,
++    val policy: String?,
++    val policyId: Int?,
++    val priority: Int?,
+     val group: String?,
+     val frozen: Boolean?,
+     val mechanism: String?,
+@@ -169,6 +176,7 @@ fun parseProcessEntry(json: JsonObject): ProcessEntry = ProcessEntry(
+     oomScoreAdj = json.int("oom_score_adj"),
+     cgroup = json.string("cgroup"),
+     cpuset = json.string("cpuset"),
++    frozen = json.bool("frozen"),
+     foreground = json.bool("foreground") ?: false,
+     system = json.bool("system") ?: false,
+     protected = json.bool("protected") ?: false,
+@@ -196,9 +204,11 @@ fun parseProcessDetail(json: JsonObject): ProcessDetail = ProcessDetail(
+     nice = json.int("nice") ?: 0,
+     rtPriority = json.int("rt_priority") ?: 0,
+     policy = json.int("policy") ?: 0,
++    policyName = json.string("policy_name"),
+     cgroup = json.string("cgroup"),
+     cpuset = json.string("cpuset"),
+     startTimeTicks = json.long("start_time_ticks") ?: 0L,
++    frozen = json.bool("frozen"),
+     foreground = json.bool("foreground") ?: false,
+     system = json.bool("system") ?: false,
+     protected = json.bool("protected") ?: false,
+@@ -206,9 +216,13 @@ fun parseProcessDetail(json: JsonObject): ProcessDetail = ProcessDetail(
+ )
+ 
+ fun parseProcessAction(json: JsonObject): ProcessActionResult = ProcessActionResult(
++    pkg = json.string("package"),
+     target = json.string("target"),
+     adjustment = json.int("adjustment"),
+     nice = json.int("nice"),
++    policy = json.string("policy"),
++    policyId = json.int("policy_id"),
++    priority = json.int("priority"),
+     group = json.string("group"),
+     frozen = json.bool("frozen"),
+     mechanism = json.string("mechanism"),
+@@ -251,6 +265,28 @@ fun processSubtitle(entry: ProcessEntry): String = buildString {
+     if (entry.state.isNotBlank() && entry.state != "S") append(" · ${entry.state}")
+ }
+ 
++/** Human-readable Linux scheduling policy label. */
++fun schedPolicyLabel(policy: Int, policyName: String? = null): String =
++    policyName?.takeIf { it.isNotBlank() && it != "UNKNOWN" } ?: when (policy) {
++        0 -> "SCHED_OTHER"
++        1 -> "SCHED_FIFO"
++        2 -> "SCHED_RR"
++        3 -> "SCHED_BATCH"
++        5 -> "SCHED_IDLE"
++        6 -> "SCHED_DEADLINE"
++        else -> "POLICY($policy)"
++    }
++
++/** CLI argument name for `sysflow process sched`. */
++fun schedPolicyArg(policy: Int): String = when (policy) {
++    1 -> "fifo"
++    2 -> "rr"
++    3 -> "batch"
++    5 -> "idle"
++    else -> "other"
++}
++
++fun isRealtimeSchedPolicy(policy: Int): Boolean = policy == 1 || policy == 2
++
+ private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
+ private fun JsonObject.array(key: String): JsonArray = this[key] as? JsonArray ?: JsonArray(emptyList())
+ private fun JsonObject.string(key: String): String? = (this[key] as? JsonPrimitive)?.contentOrNull
+diff --git a/app/src/main/kotlin/io/sysflow/feature/process/ProcessViewModel.kt b/app/src/main/kotlin/io/sysflow/feature/process/ProcessViewModel.kt
+index 0000000..1111111 100644
+--- a/app/src/main/kotlin/io/sysflow/feature/process/ProcessViewModel.kt
++++ b/app/src/main/kotlin/io/sysflow/feature/process/ProcessViewModel.kt
+@@ -25,17 +25,21 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+         val sort: String = "cpu",
+         val filter: String = "all",
+         val query: String = "",
++        val limit: Int = DEFAULT_LIMIT,
+         /** A user-initiated refresh uses a longer sampling window than the 2 s poll. */
+         val refreshing: Boolean = false,
+         /** Human label of the action in flight, or `null`. */
+         val actionRunning: String? = null,
+         val message: String? = null,
+         val error: String? = null,
+-        /** Experimental actions (OOM / cpuset / freeze) stay hidden until explicitly enabled. */
++        /** Experimental actions (OOM / sched / cpuset / freeze) stay hidden until explicitly enabled. */
+         val experimental: Boolean = false,
++        val selectionMode: Boolean = false,
++        val selectedPids: Set<Int> = emptySet(),
+     ) {
+         val hasExperimental: Boolean
+-            get() = "oom_score_adj" in features || "cpuset" in features || "freeze" in features
++            get() = "oom_score_adj" in features || "sched" in features ||
++                "cpuset" in features || "freeze" in features
+     }
+ 
+     private val _state = MutableStateFlow(UiState())
+@@ -52,7 +56,7 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+             if (!silent) _state.update { it.copy(refreshing = true) }
+             runCatching {
+                 client.processList(
+-                    limit = LIST_LIMIT,
++                    limit = current.limit.coerceIn(DEFAULT_LIMIT, MAX_LIMIT),
+                     sort = current.sort,
+                     filter = current.filter,
+                     query = current.query.ifBlank { null },
+@@ -60,12 +64,19 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+                     foreground = true,
+                 )
+             }.onSuccess { json ->
++                val parsed = parseProcessList(json)
+                 _state.update {
++                    val validPids = parsed.entries.map { entry -> entry.pid }.toSet()
+                     it.copy(
+                         loading = false,
+                         refreshing = false,
+-                        list = parseProcessList(json),
++                        list = parsed,
+                         error = null,
++                        selectedPids = if (it.selectionMode) {
++                            it.selectedPids.intersect(validPids)
++                        } else {
++                            emptySet()
++                        },
+                     )
+                 }
+             }.onFailure { error ->
+@@ -98,7 +109,9 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+     }
+ 
+     fun setQuery(query: String) {
++        val cleared = query.isEmpty() && _state.value.query.isNotEmpty()
+         _state.update { it.copy(query = query) }
++        if (cleared) refresh()
+     }
+ 
+     fun submitQuery() {
+@@ -109,6 +122,40 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+         _state.update { it.copy(experimental = !it.experimental) }
+     }
+ 
++    fun loadMore() {
++        val nextLimit = (_state.value.limit + LIMIT_STEP).coerceAtMost(MAX_LIMIT)
++        if (nextLimit == _state.value.limit) return
++        _state.update { it.copy(limit = nextLimit) }
++        refresh()
++    }
++
++    fun toggleSelectionMode() {
++        _state.update {
++            val next = !it.selectionMode
++            it.copy(selectionMode = next, selectedPids = emptySet())
++        }
++    }
++
++    fun enterSelectionWith(pid: Int) {
++        val entry = _state.value.list?.entries?.firstOrNull { it.pid == pid } ?: return
++        if (entry.protected) return
++        _state.update { it.copy(selectionMode = true, selectedPids = setOf(pid)) }
++    }
++
++    fun toggleSelected(pid: Int) {
++        val entry = _state.value.list?.entries?.firstOrNull { it.pid == pid } ?: return
++        if (entry.protected) return
++        _state.update { current ->
++            val next = current.selectedPids.toMutableSet().apply {
++                if (!add(pid)) remove(pid)
++            }.toSet()
++            current.copy(selectedPids = next)
++        }
++    }
++
++    fun clearSelection() {
++        _state.update { it.copy(selectionMode = false, selectedPids = emptySet()) }
++    }
++
+     /**
+      * Load one process into the detail sheet.
+      *
+@@ -166,6 +213,18 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+         if (failed == 0) "$target 的 nice 已设为 $nice" else "$failed 个进程未能调整 nice"
+     }
+ 
++    fun sched(target: String, policy: String, priority: Int?) =
++        runAction("调整 $target 的调度策略") {
++            val result = parseProcessAction(client.processSched(target, policy, priority))
++            val failed = result.targets.count { it.verified == false }
++            val label = result.policy ?: policy
++            val prio = result.priority?.takeIf { it > 0 }?.let { "（优先级 $it）" }.orEmpty()
++            if (failed == 0) "$target 的调度策略已设为 $label$prio"
++            else "$failed 个进程未能应用调度策略"
++        }
++
+     fun cpuset(target: String, group: String) = runAction("把 $target 移入 $group") {
+         val result = parseProcessAction(client.processCpuset(target, group))
+         val moved = result.targets.count { it.verified == true }
+@@ -185,6 +244,82 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+         }
+     }
+ 
++    fun batchStop() {
++        val stateNow = _state.value
++        val targets = stateNow.list?.entries.orEmpty()
++            .filter { it.pid in stateNow.selectedPids && !it.protected && it.packageName != null }
++            .mapNotNull { entry -> entry.packageName?.let { it to entry.user } }
++            .distinct()
++        if (targets.isEmpty()) return
++        viewModelScope.launch {
++            _state.update { it.copy(actionRunning = "批量强停 ${targets.size} 个应用", message = null, error = null) }
++            var stopped = 0
++            var skipped = 0
++            var failed = 0
++            var lastError: String? = null
++            for ((pkg, user) in targets) {
++                runCatching { parseProcessAction(client.processStop(pkg, user)) }
++                    .onSuccess { res ->
++                        when {
++                            res.alreadyStopped -> skipped += 1
++                            res.verified == true -> stopped += 1
++                            else -> failed += 1
++                        }
++                    }
++                    .onFailure { err ->
++                        failed += 1
++                        lastError = err.message
++                    }
++            }
++            val summary = buildString {
++                append("批量强停完成：已停止 $stopped 个")
++                if (skipped > 0) append("，已不在运行 $skipped 个")
++                if (failed > 0) append("，未确认或失败 $failed 个")
++                if (lastError != null && failed > 0) append("（$lastError）")
++            }
++            _state.update {
++                it.copy(
++                    actionRunning = null,
++                    selectionMode = false,
++                    selectedPids = emptySet(),
++                    message = if (failed == 0) summary else null,
++                    error = if (failed > 0) summary else null,
++                )
++            }
++            refresh(silent = true)
++        }
++    }
++
++    fun batchFreeze(frozen: Boolean) {
++        val stateNow = _state.value
++        val targets = stateNow.list?.entries.orEmpty()
++            .filter { it.pid in stateNow.selectedPids && !it.protected }
++            .map { entry -> entry.packageName ?: entry.pid.toString() }
++            .distinct()
++        if (targets.isEmpty()) return
++        val verb = if (frozen) "冻结" else "解冻"
++        viewModelScope.launch {
++            _state.update { it.copy(actionRunning = "批量${verb} ${targets.size} 项", message = null, error = null) }
++            var ok = 0
++            var failed = 0
++            var lastError: String? = null
++            for (target in targets) {
++                runCatching { client.processFreeze(target, frozen) }
++                    .onSuccess { ok += 1 }
++                    .onFailure { err ->
++                        failed += 1
++                        lastError = err.message
++                    }
++            }
++            val summary = buildString {
++                append("批量${verb}完成：成功 $ok 项")
++                if (failed > 0) append("，失败 $failed 项")
++                if (lastError != null && failed > 0) append("（$
