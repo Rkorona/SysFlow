@@ -14,7 +14,7 @@ Current module version: `v0.3.3` (`module/module.prop`).
 - Wakelock paths and device notes: [docs/modules/wakelock.md](docs/modules/wakelock.md)
 - Memory paths, items and device notes: [docs/modules/mem.md](docs/modules/mem.md)
 - Memory module plan (delivery order and step record): [docs/mem-module-plan.md](docs/mem-module-plan.md)
-- Wakelock hardening record (P0–P3 fixes, completed): [docs/wakelock-hardening-plan.md](docs/wakelock-hardening-plan.md)
+- Wakelock hardening record (P0–P3 fixes, completed): [docs/archive/wakelock-hardening-plan.md](docs/archive/wakelock-hardening-plan.md)
 - WebUI scope: [docs/webui-console.md](docs/webui-console.md)
 
 > There is no `docs/adr/` directory in this tree. Decisions that older notes call "ADR 0003/0005/0006"
@@ -223,8 +223,8 @@ no framework, no npm, no build step.
 **The WebUI is not a second client.** It is a single-screen rescue console that exposes only status,
 safe mode, reset, drift check, diagnostics and the log tail — the operations that must stay reachable
 when the APK cannot be installed, updated or launched, or when a bad configuration stopped the device
-from booting. Feature controls (CPU, battery, wakelock, memory, adaptive, screen-off, cpuset, events)
-live in the Android APK only, and the console renders no events at all.
+from booting. Feature controls (CPU, battery, wakelock, memory, process, storage, adaptive, screen-off,
+cpuset, events) live in the Android APK only, and the console renders no events at all.
 
 Keeping it this small is deliberate: full feature parity cost roughly 7 000 lines of parallel
 TypeScript and four duplicated model/copy files that had to be kept in sync by hand, and it made the
@@ -255,11 +255,13 @@ pure UI, no background service. The `SysFlowClient` calls the CLI envelope. Scre
 | screen | notes |
 |---|---|
 | 总览 Overview | device status cards, recent system activity, runtime status |
-| 模块 Module hub | CPU, battery, wakelock, memory (others marked as planned) |
+| 模块 Module hub | CPU, battery, wakelock, memory, storage, process (enabled by `caps`) |
 | CPU | core matrix, per-cluster range/governor, plus 自适应性能管理 / 熄屏管理 / 进程组 sub-pages |
 | 电池 Battery | wavy charge meter, live electrical readings, 24 h curve, health, per-app ranking |
 | 唤醒锁 Wakelock | 唤醒源 / 应用 / 持锁 tabs, AppOps switches, protected list |
 | 内存 Memory | available memory hero, composition bar, swap/zRAM, PSI curve, per-app ranking, tunables |
+| 储存 Storage | capacity / partitions, live IO + history curve, scheduler & read-ahead, TRIM, bounded usage analysis |
+| 进程 Process | searchable/sortable list, detail, one-shot stop/oom/renice and experimental cpuset/freeze |
 | 系统事件 Events | Room-backed filterable, paginated history |
 | 设置 + 诊断与日志 | boot/daemon configuration, safe mode, recovery, diagnostics |
 
@@ -272,8 +274,12 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 
 ```sh
 ./build-sysflow-module.sh
-# dist/sysflow-module-v0.3.3.zip (+ .sha256)
+# dist/sysflow-module-<version>.zip (+ .sha256)
 ```
+
+The version comes from `module/module.prop`. The current working tree contains only
+`dist/sysflow-module-v0.3.3.zip.sha256`; the zip itself is a build/release artifact produced by the
+script above.
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the
 ARM64 release binary, checks the static WebUI assets and packages the zip. Equivalent manual steps:

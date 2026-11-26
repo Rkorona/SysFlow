@@ -96,11 +96,12 @@ client can put in a 2 s snapshot poll.
 ### 3.1 version
 
 ```json
-{"v":1,"ok":true,"data":{"sysflow_version":"0.2.2","protocol":1,"config_version":1}}
+{"v":1,"ok":true,"data":{"sysflow_version":"0.3.2","protocol":1,"config_version":1}}
 ```
 
-`sysflow_version` is the crate version from `core/Cargo.toml`; `module/module.prop` carries the same
-version for the module manager.
+`sysflow_version` is the crate version from `core/Cargo.toml` (currently `0.3.2`), while the module
+package version comes from `module/module.prop` (currently `v0.3.3`) for the module manager; the two
+are not currently in sync.
 
 ### 3.2 info
 
@@ -271,8 +272,9 @@ items are rejected.
 }}
 ```
 
-Without `--step`, `step_s` is the module's own sampling interval (60 s for `battery`, 300 s for
-`wakelock` and `mem`).
+Without `--step`, `step_s` is `max(60, since / 288)`; with the default `--since 24h` this is 300 s.
+The modules' own sampling intervals (used by the daemon when writing samples) are 60 s for `battery`
+and 300 s for `wakelock` and `mem`; see the retention paragraph below.
 
 Timestamps are Unix seconds; missing points are `null`. `--since`/`--step` accept `90s`, `5m`,
 `24h`, `7d`.
@@ -1447,7 +1449,7 @@ items. `Envelope<T>` / `ProtocolError` are shared by every response.
 
 Generated types today: `ErrorCode`, `ItemType`, `Scope`, `Risk`, `ProtocolError`, `Caps`,
 `CapsData`, `SchemaItem`, `Schema`, `ApplyResult`, `SnapshotData`, `CheckData`, `VersionData`,
-`SafeStatus`, `HistoryData`, `DaemonStatus`. Two known gaps: `DaemonStatus` models only `running`
+`SafeStatus`, `HistoryData` (including the `points` field from §3.9), `DaemonStatus`. Two known gaps: `DaemonStatus` models only `running`
 and `implemented` — the CLI also returns `enabled` and `interval_s` — and there is no `BootStatus`
 type, so `boot status` is still parsed as `JsonObject`.
 

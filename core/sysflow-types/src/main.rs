@@ -233,6 +233,7 @@ fn defs() -> Vec<Def> {
                 field("module", STR),
                 field("step_s", LONG),
                 field("daemon_running", BOOL),
+                field("points", INT),
                 field("series", JSON_OBJECT),
             ],
         },

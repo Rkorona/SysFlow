@@ -152,6 +152,7 @@ data class HistoryData(
     val module: String,
     val step_s: Long,
     val daemon_running: Boolean,
+    val points: Int,
     val series: JsonObject
 )
 
