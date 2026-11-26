@@ -11,6 +11,7 @@ mod process_get;
 mod process_list;
 mod process_probe;
 mod storage_io;
+mod storage_partitions;
 mod storage_probe;
 mod storage_trim;
 mod storage_usage;
@@ -327,6 +328,7 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
         // Storage verbs: live I/O needs a sampling interval, usage is a bounded tree walk, trim is
         // a one-shot action, and the probe is the hidden Step 1 diagnostic.
         "io" if module == "storage" => storage_io::run(reg, rest),
+        "partitions" if module == "storage" => storage_partitions::run(reg),
         "usage" if module == "storage" => storage_usage::run(reg, rest),
         "trim" if module == "storage" => storage_trim::run(reg, rest),
         "probe" if module == "storage" => storage_probe::run(reg),

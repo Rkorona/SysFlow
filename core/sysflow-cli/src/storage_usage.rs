@@ -10,7 +10,7 @@ use sysflow_core::registry::Registry;
 
 use sysflow_modules::storage::usage::{self, UsageOptions};
 
-pub fn run(_reg: &Registry, rest: &[&str]) -> Result<Value> {
+pub fn run(reg: &Registry, rest: &[&str]) -> Result<Value> {
     let path = flag(rest, "--path").unwrap_or("/data").to_string();
     let limit = flag(rest, "--limit")
         .map(|value| {
@@ -29,11 +29,16 @@ pub fn run(_reg: &Registry, rest: &[&str]) -> Result<Value> {
         .transpose()?
         .unwrap_or(usage::DEFAULT_BUDGET_MS);
 
-    usage::scan(&UsageOptions {
+    let options = UsageOptions {
         path,
         limit,
         budget_ms,
-    })
+    };
+    if options.path == "/" {
+        // `/` is the read-only rootfs plus a set of mounts; a plain walk would see almost nothing.
+        return usage::scan_root(&reg.ctx().sysfs, &options);
+    }
+    usage::scan(&options)
 }
 
 fn flag<'a>(args: &[&'a str], name: &str) -> Option<&'a str> {

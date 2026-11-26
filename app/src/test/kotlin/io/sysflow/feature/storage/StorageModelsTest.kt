@@ -133,6 +133,29 @@ class StorageModelsTest {
     }
 
     @Test
+    fun partitions_parse_the_mount_overview() {
+        val partitions = parseStoragePartitions(
+            json(
+                """
+                {"available":true,"partitions":[
+                  {"mount":"/data","device":"/dev/block/dm-5","fstype":"f2fs",
+                   "total_kb":243000000,"used_kb":198000000,"free_kb":45000000,
+                   "avail_kb":44000000,"used_pct":81},
+                  {"mount":"/system","device":"/dev/block/dm-2","fstype":"erofs",
+                   "total_kb":4200000,"used_kb":4100000,"free_kb":100000,
+                   "avail_kb":100000,"used_pct":97}]}
+                """,
+            ),
+        )
+        assertEquals(2, partitions.size)
+        assertEquals("/data", partitions[0].mount)
+        assertEquals("f2fs", partitions[0].fstype)
+        assertEquals(81, partitions[0].usedPct)
+        assertEquals(198_000_000L, partitions[0].usedKb)
+        assertEquals(0.81f, partitions[0].usedFraction, 0.01f)
+    }
+
+    @Test
     fun formatting_is_readable_and_degrades_with_a_dash() {
         assertEquals("—", formatStorageKb(null))
         assertEquals("1.0 GB", formatStorageKb(1024L * 1024L))

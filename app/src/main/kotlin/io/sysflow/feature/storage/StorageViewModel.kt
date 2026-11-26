@@ -211,5 +211,8 @@ class StorageViewModel(private val client: SysFlowClient) : ViewModel() {
 
         /** The whole data partition, including `/data/media` and every app's private data. */
         const val SYSTEM_DATA = "/data"
+
+        /** The phone's root: mounts reported as partitions, everything else walked. */
+        const val WHOLE_DEVICE = "/"
     }
 }

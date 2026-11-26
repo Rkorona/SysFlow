@@ -208,7 +208,7 @@ dependencies = [
 
 [[package]]
 name = "sysflow-cli"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "clap",
  "serde_json",
@@ -218,7 +218,7 @@ dependencies = [
 
 [[package]]
 name = "sysflow-core"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -226,7 +226,7 @@ dependencies = [
 
 [[package]]
 name = "sysflow-modules"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "serde",
  "serde_json",
@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "sysflow-types"
-version = "0.3.0"
+version = "0.3.2"
 
 [[package]]
 name = "unicode-ident"

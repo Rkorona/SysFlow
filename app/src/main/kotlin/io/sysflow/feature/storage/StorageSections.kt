@@ -472,20 +472,26 @@ internal fun MaintenanceSection(
                 ActionGroupHeader(
                     icon = Icons.Rounded.FolderOpen,
                     title = "目录占用",
-                    supporting = "内部存储看照片/下载，应用数据看整块 /data；最多约 3 秒",
+                    supporting = "内部存储看用户文件，应用数据看 /data，根目录看手机 / 的顶层条目",
                     container = scheme.tertiaryContainer,
                     content = scheme.onTertiaryContainer,
                 )
                 ConnectedChoiceRow(
-                    options = listOf(StorageViewModel.USER_STORAGE, StorageViewModel.SYSTEM_DATA),
+                    options = listOf(
+                        StorageViewModel.USER_STORAGE,
+                        StorageViewModel.SYSTEM_DATA,
+                        StorageViewModel.WHOLE_DEVICE,
+                    ),
                     selected = state.usagePath,
                     label = { usageLabel(it) },
                     onSelect = onUsagePath,
                     enabled = !state.usageLoading,
                 )
                 NoteTile(
-                    text = "内部存储 = /storage/emulated/0（DCIM、Download、Android 等用户文件）；" +
-                        "应用数据 = /data 整块分区，包含前者，两个视图不可相加。",
+                    text = "内部存储 = /storage/emulated/0（照片、下载等用户文件）；" +
+                        "应用数据 = /data 整块分区（包含前者）；根目录 = 手机 / 的顶层清单，" +
+                        "挂载点（/data、/system…）显示分区已用，proc/sys 等标为伪文件系统。" +
+                        "三者不可相加。",
                 )
                 if (state.usageLoading) BusyTile("扫描中（最多约 3 秒）")
                 FilledTonalButton(
@@ -501,10 +507,10 @@ internal fun MaintenanceSection(
                     )
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
                     Text(
-                        if (state.usagePath == StorageViewModel.SYSTEM_DATA) {
-                            "分析应用数据"
-                        } else {
-                            "分析内部存储"
+                        when (state.usagePath) {
+                            StorageViewModel.SYSTEM_DATA -> "分析应用数据"
+                            StorageViewModel.WHOLE_DEVICE -> "扫描根目录"
+                            else -> "分析内部存储"
                         },
                         maxLines = 1,
                     )
@@ -520,6 +526,7 @@ internal fun MaintenanceSection(
 internal fun usageLabel(path: String): String = when (path) {
     StorageViewModel.USER_STORAGE -> "内部存储"
     StorageViewModel.SYSTEM_DATA -> "应用数据"
+    StorageViewModel.WHOLE_DEVICE -> "根目录"
     else -> path
 }
 
@@ -528,10 +535,16 @@ internal fun usageLabel(path: String): String = when (path) {
 private fun UsageResult(usage: StorageUsage) {
     val scheme = MaterialTheme.colorScheme
     val accent = MaterialTheme.sysFlowColors.containerAccent
+    val root = usage.mode == "root"
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         SectionHeader(
-            title = "${usageLabel(usage.path)} 共 ${formatStorageKb(usage.totalKb)}",
-            supporting = "耗时 ${usage.elapsedMs} ms · 访问 ${usage.visited} 项" +
+            title = if (root) {
+                "根目录"
+            } else {
+                "${usageLabel(usage.path)} 共 ${formatStorageKb(usage.totalKb)}"
+            },
+            supporting = (if (root) "挂载点显示分区已用；普通目录为扫描大小 · " else "") +
+                "耗时 ${usage.elapsedMs} ms · 访问 ${usage.visited} 项" +
                 if (usage.denied > 0) " · ${usage.denied} 项无权限" else "",
             action = {
                 if (usage.partial) {
@@ -548,7 +561,10 @@ private fun UsageResult(usage: StorageUsage) {
             NoteTile(text = "没有可统计的条目")
             return@Column
         }
-        val heaviest = usage.entries.maxOf { it.kb }.coerceAtLeast(1)
+        val heaviest = usage.entries
+            .filter { it.kind == "dir" || it.kind == "file" }
+            .maxOfOrNull { it.kb }
+            ?.coerceAtLeast(1) ?: 1
         usage.entries.forEachIndexed { index, entry ->
             val top = index == 0
             val content = if (top) scheme.onPrimaryContainer else scheme.onSurface
@@ -574,22 +590,41 @@ private fun UsageResult(usage: StorageUsage) {
                             overflow = TextOverflow.Ellipsis,
                         )
                         Text(
-                            formatStorageKb(entry.kb),
+                            when (entry.kind) {
+                                "mount" -> "${entry.usedPct ?: 0}%"
+                                "dir", "file" -> formatStorageKb(entry.kb)
+                                else -> "—"
+                            },
                             style = MaterialTheme.typography.titleSmallEmphasized,
                             maxLines = 1,
                         )
                     }
-                    UsageBar(
-                        fraction = entry.kb.toFloat() / heaviest,
-                        color = if (top) accent else scheme.primary,
-                        track = if (top) {
-                            scheme.onPrimaryContainer.copy(alpha = 0.16f)
-                        } else {
-                            scheme.surfaceContainerHighest
-                        },
-                    )
+                    val fraction = when (entry.kind) {
+                        "mount" -> (entry.usedPct ?: 0) / 100f
+                        "dir", "file" -> entry.kb.toFloat() / heaviest
+                        else -> null
+                    }
+                    if (fraction != null) {
+                        UsageBar(
+                            fraction = fraction,
+                            color = if (top) accent else scheme.primary,
+                            track = if (top) {
+                                scheme.onPrimaryContainer.copy(alpha = 0.16f)
+                            } else {
+                                scheme.surfaceContainerHighest
+                            },
+                        )
+                    }
                     Text(
-                        "${entry.dirs} 目录 · ${entry.files} 文件",
+                        when (entry.kind) {
+                            "mount" -> "分区已用 ${formatStorageKb(entry.kb)} / " +
+                                "${formatStorageKb(entry.totalKb)}" +
+                                (entry.fstype?.let { " · $it" } ?: "")
+                            "pseudo" -> "伪文件系统，不计入空间"
+                            "view" -> "重复视图，不计入空间"
+                            "symlink" -> "符号链接，不跟随"
+                            else -> "${entry.dirs} 目录 · ${entry.files} 文件"
+                        },
                         style = MaterialTheme.typography.labelSmall,
                         color = content.copy(alpha = 0.75f),
                     )

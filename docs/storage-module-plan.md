@@ -80,6 +80,12 @@
 并保留整块分区作为诊断视图。**有界**：超时返回 `partial:true` 与 `visited`；跳符号链接、
 不跨文件系统；无权限条目计入 `denied`。`limit` 钳 1–100。
 
+### `storage partitions`
+
+列出所有真实挂载点的 `statvfs` 已用/总量（按已用降序），过滤 `proc/sysfs/tmpfs/cgroup*` 等伪
+文件系统与 `/storage/*`、`/mnt/*` 重复视图。它**不是**对 `/` 的目录遍历：`/` 只有 rootfs 初始化
+文件，空间都在挂载点上。APK 的第三个目录分析目标"整机分区"调用的就是它。
+
 ### `storage trim [--path /data]`
 
 `fstrim -v <path>` 一次；只接受 `/data` 或 `/storage/emulated/0`；返回 `trimmed_bytes` / `output` /

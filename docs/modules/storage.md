@@ -56,6 +56,13 @@ Required output (checked off as it lands):
   used, not `sda1`.
 - **Directory sizes are allocated blocks** (`st_blocks × 512`), not apparent size; symlinks are not
   followed and other filesystems are not crossed.
+- **`storage partitions` is the mount-level view**, not a walk of `/`: it lists every real mount
+  with `statvfs` numbers and skips pseudo filesystems and duplicate views (`/storage/*`, `/mnt/*`).
+  A directory walk of `/` would only see the read-only rootfs and would skip the mounts.
+- **Root mode** (`--path /`) lists the phone's root: mount points are reported as partition
+  used/total (never walked), rootfs files/dirs are walked, and `proc/sys/dev`, `/storage/*`,
+  `/mnt/*`, `/apex/*` and symlinks are labelled instead of counted. This is the literal `ls /`
+  view with sizes.
 - **Two analysis targets.** `/storage/emulated/0` is the user-visible internal storage (DCIM,
   Download, Android…), while `/data` is the whole partition (app, data, media, system…).
   `/storage/emulated/0` is the same blocks as `/data/media/0`, so the two totals must never be
@@ -129,7 +136,11 @@ Filled per step; do not guess.
 3. **I/O** vs a manual `cat /proc/diskstats` pair over the same interval.
 4. **Scheduler / read_ahead**: change both, read back, reboot, confirm replay; then `reset`.
 5. **TRIM**: run it, confirm `trimmed_bytes > 0` and the device stays responsive.
-6. **Directory analysis**: run with the default budget on both `/storage/emulated/0` and `/data`;
+6. **Partitions**: run `storage partitions`; compare `/data` with `df -k /data`, and confirm
+   `/storage` / `/mnt` rows are absent (they would double-count).
+7. **Root scan**: `sysflow storage usage --path /`; compare the mount rows (`/data`, `/system`,
+   `/cache`…) with `df -k` and check `pseudo`/`view`/`symlink` entries are labelled, not counted.
+8. **Directory analysis**: run with the default budget on both `/storage/emulated/0` and `/data`;
    report elapsed, `partial`, denied counts, and whether the top entries look right (compare with
    `du -x -d1 /storage/emulated/0` and `du -x -d1 /data`). They must not be added together.
 7. **Low-space event**: hard to force on a healthy device; check the event path by temporarily

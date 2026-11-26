@@ -4,7 +4,7 @@ Unified system manager for rooted Android: a root **module** (Rust binary `sysfl
 enforcement/adaptive daemon and KernelSU WebUI) plus an **M3 Expressive APK** that is pure UI
 and never runs in the background.
 
-Current module version: `v0.3.0` (`module/module.prop`).
+Current module version: `v0.3.2` (`module/module.prop`).
 
 - Plan and decisions: [docs/development-plan.md](docs/development-plan.md)
 - Protocol: [docs/protocol.md](docs/protocol.md)
@@ -173,6 +173,8 @@ sysflow storage get --pretty                    # capacity, device, scheduler, r
 sysflow storage io --interval-ms 1000           # live read/write KB/s, IOPS, utilisation
 sysflow storage usage --path /storage/emulated/0 --budget-ms 3000  # user-visible internal storage
 sysflow storage usage --path /data --budget-ms 3000               # whole partition (includes the above)
+sysflow storage usage --path / --budget-ms 3000                    # phone root: mounts as used/total
+sysflow storage partitions                                        # every real mount, statvfs used/total
 sysflow storage trim                            # fstrim -v /data (one-shot, not persisted)
 sysflow storage set '{"storage.scheduler":"kyber"}' --persist
 sysflow storage set '{"storage.read_ahead_kb":1024}' --persist
@@ -262,7 +264,7 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 
 ```sh
 ./build-sysflow-module.sh
-# dist/sysflow-module-v0.3.0.zip (+ .sha256)
+# dist/sysflow-module-v0.3.2.zip (+ .sha256)
 ```
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the

@@ -9,6 +9,7 @@ pub mod capacity;
 pub mod device;
 pub mod diskstats;
 pub mod history;
+pub mod partitions;
 pub mod tunables;
 pub mod usage;
 

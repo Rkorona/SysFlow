@@ -1286,11 +1286,39 @@ sysflow storage usage [--path /data] [--limit 20] [--budget-ms 3000]
   `media`, `system`, …) or `/storage/emulated/0` (the user-visible internal storage: `DCIM`,
   `Download`, `Android`, …). These are two views of the **same** blocks — `/storage/emulated/0` is
   `/data/media/0` — so their totals must never be added together.
+- **Root mode.** `--path /` is special: `/` is the read-only rootfs, so entries that are mounts
+  (`/data`, `/system`, `/cache`, `/efs`, …) are reported as their filesystem **used/total** instead
+  of being walked (walking `/data` would defeat the time budget), while rootfs files and directories
+  are walked normally. Every entry carries `kind`: `dir`, `file`, `mount`, `pseudo` (`proc`, `sys`,
+  `dev`), `view` (`/storage`, `/mnt`, `/apex`) or `symlink`. `mount` entries also carry
+  `total_kb`, `used_pct`, `device` and `fstype`, and `kb` is their used space; `pseudo`/`view`/
+  `symlink` entries have `kb: 0` and are not counted. The response sets `"mode":"root"`.
 - **Time-bounded**: stops at the budget and reports `partial:true`; `visited` says how far it got.
 - **Symlinks are never followed and other filesystems are not crossed**, so `/data/media` (and bind
   mounts) cannot be counted twice. Unreadable entries increment `denied` instead of failing.
 - `limit` is clamped to 1..100. This is the heaviest verb in SysFlow; the APK only runs it on an
   explicit tap.
+
+#### `storage partitions`
+
+```sh
+sysflow storage partitions
+```
+
+```json
+{"v":1,"ok":true,"data":{"available":true,"partitions":[
+  {"mount":"/data","device":"/dev/block/dm-5","fstype":"f2fs",
+   "total_kb":243000000,"used_kb":198000000,"free_kb":45000000,"avail_kb":44000000,"used_pct":81},
+  {"mount":"/system","device":"/dev/block/dm-2","fstype":"erofs",
+   "total_kb":4200000,"used_kb":4100000,"free_kb":100000,"avail_kb":100000,"used_pct":97}]}}
+```
+
+- The honest **whole-device** view: every real mount with its `statvfs` numbers, heaviest first.
+- Pseudo filesystems (`proc`, `sysfs`, `tmpfs`, `cgroup*`, …) and duplicate views (`/storage/*`,
+  `/mnt/*`, which expose the same blocks as `/data`) are filtered out, so rows can be added without
+  double counting.
+- This is **not** a directory walk of `/`: the rootfs holds only the init files, while the space
+  lives on the mounts listed here. Use `storage usage` for a tree under one mount.
 
 #### `storage trim`
 

@@ -246,6 +246,10 @@ class SysFlowClient(private val root: RootExecutor) {
         return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
     }
 
+    /** Whole-device mount overview (protocol §3.26): one row per real filesystem. */
+    suspend fun storagePartitions(): JsonObject =
+        parseEnvelope<JsonObject>(run("storage", "partitions")).jsonObject
+
     /** One-shot `fstrim -v /data`. */
     suspend fun storageTrim(path: String = "/data"): JsonObject =
         parseEnvelope<JsonObject>(run("storage", "trim", "--path", path)).jsonObject

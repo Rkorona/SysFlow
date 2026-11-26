@@ -69,10 +69,32 @@ data class StorageUsageEntry(
     val kb: Long,
     val files: Long,
     val dirs: Long,
+    /** `dir` / `file` / `mount` / `pseudo` / `view` / `symlink`; root scans use all of them. */
+    val kind: String = "dir",
+    val device: String? = null,
+    val fstype: String? = null,
+    /** Only for mounts: the filesystem total, and `kb` is its used space. */
+    val totalKb: Long? = null,
+    val usedPct: Int? = null,
 )
+
+data class StoragePartition(
+    val mount: String,
+    val device: String,
+    val fstype: String,
+    val totalKb: Long,
+    val usedKb: Long,
+    val freeKb: Long,
+    val availKb: Long,
+    val usedPct: Int,
+) {
+    val usedFraction: Float
+        get() = if (totalKb <= 0) 0f else (usedKb.toFloat() / totalKb).coerceIn(0f, 1f)
+}
 
 data class StorageUsage(
     val path: String,
+    val mode: String? = null,
     val partial: Boolean,
     val elapsedMs: Long,
     val denied: Long,
@@ -144,8 +166,25 @@ fun parseStorageIo(json: JsonObject): StorageIo = StorageIo(
     totalWriteKb = json.long("total_write_kb"),
 )
 
+fun parseStoragePartitions(json: JsonObject): List<StoragePartition> =
+    json.array("partitions").mapNotNull { element ->
+        (element as? JsonObject)?.let { row ->
+            StoragePartition(
+                mount = row.string("mount") ?: return@let null,
+                device = row.string("device") ?: "",
+                fstype = row.string("fstype") ?: "",
+                totalKb = row.long("total_kb") ?: 0,
+                usedKb = row.long("used_kb") ?: 0,
+                freeKb = row.long("free_kb") ?: 0,
+                availKb = row.long("avail_kb") ?: 0,
+                usedPct = row.int("used_pct") ?: 0,
+            )
+        }
+    }
+
 fun parseStorageUsage(json: JsonObject): StorageUsage = StorageUsage(
     path = json.string("path") ?: "/data",
+    mode = json.string("mode"),
     partial = json.bool("partial") ?: false,
     elapsedMs = json.long("elapsed_ms") ?: 0,
     denied = json.long("denied") ?: 0,
@@ -159,6 +198,11 @@ fun parseStorageUsage(json: JsonObject): StorageUsage = StorageUsage(
                 kb = entry.long("kb") ?: 0,
                 files = entry.long("files") ?: 0,
                 dirs = entry.long("dirs") ?: 0,
+                kind = entry.string("kind") ?: "dir",
+                device = entry.string("device"),
+                fstype = entry.string("fstype"),
+                totalKb = entry.long("total_kb"),
+                usedPct = entry.int("used_pct"),
             )
         }
     },
