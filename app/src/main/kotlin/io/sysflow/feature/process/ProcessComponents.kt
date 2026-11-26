@@ -2,7 +2,20 @@
 
 package io.sysflow.feature.process
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.remember
+import androidx.compose.ui.draw.rotate
+import kotlinx.coroutines.delay
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -362,6 +375,100 @@ internal fun ActionGroupHeader(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+        }
+    }
+}
+
+/**
+ * One collapsible action group in the detail sheet's connected list.
+ *
+ * Collapsed it is a single 72 dp-ish row (badge, title, current value, chevron), so six groups cost
+ * about one screen instead of five. Expanding morphs the card's corners to fully rounded and
+ * reveals the controls; [position]/[count] give neighbours the M3E connected-list shape (large
+ * outer corners, small inner ones). The sheet scrolls the opened card into view.
+ */
+@Composable
+internal fun ExpandableActionCard(
+    expanded: Boolean,
+    onToggle: () -> Unit,
+    icon: ImageVector,
+    title: String,
+    supporting: String,
+    position: Int,
+    count: Int,
+    modifier: Modifier = Modifier,
+    badgeContainer: Color = MaterialTheme.colorScheme.secondaryContainer,
+    badgeContent: Color = MaterialTheme.colorScheme.onSecondaryContainer,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    val outer = 28.dp
+    val inner = 6.dp
+    val spec = MaterialTheme.motionScheme.defaultEffectsSpec<androidx.compose.ui.unit.Dp>()
+    val top by animateDpAsState(if (expanded || position == 0) outer else inner, spec, label = "actionTop")
+    val bottom by animateDpAsState(
+        if (expanded || position == count - 1) outer else inner,
+        spec,
+        label = "actionBottom",
+    )
+    val container by animateColorAsState(
+        if (expanded) scheme.surfaceContainerHighest else scheme.surfaceContainerHigh,
+        MaterialTheme.motionScheme.defaultEffectsSpec(),
+        label = "actionContainer",
+    )
+    val rotation by animateFloatAsState(
+        if (expanded) 180f else 0f,
+        MaterialTheme.motionScheme.defaultEffectsSpec(),
+        label = "actionChevron",
+    )
+    val requester = remember { BringIntoViewRequester() }
+    LaunchedEffect(expanded) {
+        if (expanded) {
+            delay(240) // let the expand animation lay the body out first
+            requester.bringIntoView()
+        }
+    }
+
+    Surface(
+        modifier = modifier
+            .fillMaxWidth()
+            .bringIntoViewRequester(requester),
+        shape = RoundedCornerShape(topStart = top, topEnd = top, bottomStart = bottom, bottomEnd = bottom),
+        color = container,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable(onClick = onToggle)
+                    .padding(horizontal = 16.dp, vertical = 14.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                ActionGroupHeader(
+                    icon = icon,
+                    title = title,
+                    supporting = supporting,
+                    modifier = Modifier.weight(1f),
+                    container = badgeContainer,
+                    content = badgeContent,
+                )
+                Icon(
+                    Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = scheme.onSurfaceVariant,
+                    modifier = Modifier.rotate(rotation),
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(start = 16.dp, end = 16.dp, bottom = 16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                    content = content,
+                )
+            }
         }
     }
 }

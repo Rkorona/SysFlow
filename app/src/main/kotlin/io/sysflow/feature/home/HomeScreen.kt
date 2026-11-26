@@ -65,6 +65,7 @@ import io.sysflow.core.model.formatKhz
 import io.sysflow.core.model.formatTemp
 import io.sysflow.core.ui.components.StatusPill
 import io.sysflow.core.ui.components.segmentedShape
+import io.sysflow.core.ui.theme.ModuleTone
 import io.sysflow.core.ui.theme.sysFlowColors
 import io.sysflow.feature.mem.parseMemSnapshot
 import io.sysflow.feature.storage.formatStorageKb
@@ -156,8 +157,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         title = "CPU",
                         icon = Icons.Rounded.Memory,
-                        accent = MaterialTheme.colorScheme.surface.copy(alpha = 0.64f),
-                        accentContent = MaterialTheme.colorScheme.onSurface,
+                        tone = MaterialTheme.sysFlowColors.tones.cpu,
                         value = cpuSummary?.usage?.let { "${(it * 100f).roundToInt()}%" } ?: "—",
                         valueSuffix = if (cpuSummary != null) "使用率" else "",
                         meter = cpuSummary?.let { it.usage ?: 0f },
@@ -176,8 +176,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         title = "BATTERY",
                         icon = Icons.Rounded.BatteryFull,
-                        accent = MaterialTheme.colorScheme.tertiaryContainer.copy(alpha = 0.62f),
-                        accentContent = MaterialTheme.colorScheme.onTertiaryContainer,
+                        tone = MaterialTheme.sysFlowColors.tones.battery,
                         value = battery?.capacity?.toString() ?: "—",
                         valueSuffix = if (battery?.capacity != null) "%" else "",
                         detail = AnnotatedString(
@@ -201,7 +200,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         title = "MEMORY",
                         icon = Icons.Rounded.Dns,
-                        accent = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+                        tone = MaterialTheme.sysFlowColors.tones.mem,
                         value = mem?.let { "${(it.usedKb * 100.0 / it.totalKb).roundToInt()}%" } ?: "—",
                         valueSuffix = if (mem != null) "已用" else "",
                         meter = mem?.let { it.usedKb.toFloat() / it.totalKb },
@@ -221,7 +220,7 @@ fun HomeScreen(
                         modifier = Modifier.weight(1f),
                         title = "STORAGE",
                         icon = Icons.Rounded.Storage,
-                        accent = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
+                        tone = MaterialTheme.sysFlowColors.tones.storage,
                         value = storage?.let { "${it.capacity.usedPct}%" } ?: "—",
                         valueSuffix = if (storage != null) "已用" else "",
                         meter = storage?.let { it.capacity.usedFraction },
@@ -394,8 +393,7 @@ private fun DeviceStatusCard(
     statusWarn: Boolean = false,
     coreDots: List<Boolean>? = null,
     meter: Float? = null,
-    accent: Color = MaterialTheme.colorScheme.secondaryContainer,
-    accentContent: Color = MaterialTheme.colorScheme.onSecondaryContainer,
+    tone: ModuleTone = MaterialTheme.sysFlowColors.tones.cpu,
     statusActive: Boolean = false,
     onClick: (() -> Unit)? = null,
 ) {
@@ -406,9 +404,9 @@ private fun DeviceStatusCard(
                 if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier,
             ),
         shape = MaterialTheme.shapes.extraLarge,
-        color = if (onClick != null) MaterialTheme.colorScheme.primaryContainer
+        color = if (onClick != null) tone.container
         else MaterialTheme.colorScheme.surfaceContainerLow,
-        contentColor = if (onClick != null) MaterialTheme.colorScheme.onPrimaryContainer
+        contentColor = if (onClick != null) tone.onContainer
         else MaterialTheme.colorScheme.onSurface,
         tonalElevation = 1.dp,
     ) {
@@ -423,13 +421,13 @@ private fun DeviceStatusCard(
                     modifier = Modifier
                         .size(38.dp)
                         .clip(MaterialShapes.Cookie6Sided.toShape())
-                        .background(accent),
+                        .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.64f)),
                     contentAlignment = Alignment.Center,
                 ) {
                     Icon(
                         icon,
                         contentDescription = null,
-                        tint = accentContent,
+                        tint = MaterialTheme.colorScheme.onSurface,
                         modifier = Modifier.size(21.dp),
                     )
                 }
@@ -437,7 +435,7 @@ private fun DeviceStatusCard(
                 Text(
                     title,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (onClick != null) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.68f)
+                    color = if (onClick != null) tone.onContainer.copy(alpha = 0.68f)
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     fontWeight = FontWeight.Bold,
                 )
@@ -447,7 +445,7 @@ private fun DeviceStatusCard(
                     Text(
                         value,
                         style = MaterialTheme.typography.headlineMediumEmphasized,
-                        color = if (onClick != null) MaterialTheme.colorScheme.onPrimaryContainer
+                        color = if (onClick != null) tone.onContainer
                         else MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                     )
@@ -456,7 +454,7 @@ private fun DeviceStatusCard(
                             valueSuffix,
                             modifier = Modifier.padding(bottom = 4.dp),
                             style = MaterialTheme.typography.labelMedium,
-                            color = if (onClick != null) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.72f)
+                            color = if (onClick != null) tone.onContainer.copy(alpha = 0.72f)
                             else MaterialTheme.colorScheme.onSurfaceVariant,
                         )
                     }
@@ -464,7 +462,7 @@ private fun DeviceStatusCard(
                 Text(
                     detailAnnotated ?: detail,
                     style = MaterialTheme.typography.bodySmall,
-                    color = if (onClick != null) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                    color = if (onClick != null) tone.onContainer.copy(alpha = 0.76f)
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -473,15 +471,15 @@ private fun DeviceStatusCard(
                     WavyMeter(
                         progress = meter,
                         modifier = Modifier.padding(top = 4.dp),
-                        color = MaterialTheme.sysFlowColors.containerAccent,
-                        trackColor = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.22f),
+                        color = tone.accent,
+                        trackColor = tone.onContainer.copy(alpha = 0.22f),
                     )
                 }
             }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 if (coreDots != null) {
-                    val dotColor = if (statusWarn) MaterialTheme.sysFlowColors.warning
-                    else MaterialTheme.sysFlowColors.containerAccent
+                    val dotColor = if (statusWarn) tone.warn
+                    else tone.accent
                     Row(horizontalArrangement = Arrangement.spacedBy(3.dp), verticalAlignment = Alignment.CenterVertically) {
                         coreDots.forEach { on ->
                             Box(
@@ -501,7 +499,7 @@ private fun DeviceStatusCard(
                             .size(6.dp)
                             .clip(MaterialTheme.shapes.small)
                             .background(
-                                if (statusActive) MaterialTheme.sysFlowColors.containerAccent
+                                if (statusActive) tone.accent
                                 else MaterialTheme.colorScheme.outlineVariant,
                             ),
                     )
@@ -510,8 +508,8 @@ private fun DeviceStatusCard(
                     status,
                     style = MaterialTheme.typography.labelSmall,
                     color = when {
-                        statusWarn -> MaterialTheme.sysFlowColors.warning
-                        statusActive -> MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                        statusWarn -> tone.warn
+                        statusActive -> tone.onContainer.copy(alpha = 0.76f)
                         else -> MaterialTheme.colorScheme.outline
                     },
                     maxLines = 1,
@@ -529,6 +527,7 @@ fun ModuleFeatureCard(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     modifier: Modifier = Modifier,
     ready: Boolean = false,
+    tone: ModuleTone = MaterialTheme.sysFlowColors.tones.cpu,
     onClick: (() -> Unit)? = null,
 ) {
     Surface(
@@ -536,9 +535,9 @@ fun ModuleFeatureCard(
             .height(112.dp)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier),
         shape = MaterialTheme.shapes.extraLarge,
-        color = if (ready) MaterialTheme.colorScheme.primaryContainer
+        color = if (ready) tone.container
         else MaterialTheme.colorScheme.surfaceContainerLow,
-        contentColor = if (ready) MaterialTheme.colorScheme.onPrimaryContainer
+        contentColor = if (ready) tone.onContainer
         else MaterialTheme.colorScheme.onSurface,
         tonalElevation = 1.dp,
     ) {
@@ -574,7 +573,7 @@ fun ModuleFeatureCard(
                 Text(
                     title,
                     style = MaterialTheme.typography.titleSmallEmphasized,
-                    color = if (ready) MaterialTheme.colorScheme.onPrimaryContainer
+                    color = if (ready) tone.onContainer
                     else MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -582,7 +581,7 @@ fun ModuleFeatureCard(
                 Text(
                     subtitle,
                     style = MaterialTheme.typography.labelSmall,
-                    color = if (ready) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                    color = if (ready) tone.onContainer.copy(alpha = 0.76f)
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
@@ -593,14 +592,14 @@ fun ModuleFeatureCard(
                             .size(5.dp)
                             .clip(MaterialTheme.shapes.small)
                             .background(
-                                if (ready) MaterialTheme.sysFlowColors.containerAccent
+                                if (ready) tone.accent
                                 else MaterialTheme.colorScheme.outlineVariant,
                             ),
                     )
                     Text(
                         if (ready) "已接入" else "规划中",
                         style = MaterialTheme.typography.labelSmall,
-                        color = if (ready) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.76f)
+                        color = if (ready) tone.onContainer.copy(alpha = 0.76f)
                         else MaterialTheme.colorScheme.outline,
                     )
                 }
@@ -609,7 +608,7 @@ fun ModuleFeatureCard(
                 Icon(
                     Icons.Rounded.ChevronRight,
                     contentDescription = null,
-                    tint = if (ready) MaterialTheme.colorScheme.onPrimaryContainer
+                    tint = if (ready) tone.onContainer
                     else MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.size(18.dp),
                 )

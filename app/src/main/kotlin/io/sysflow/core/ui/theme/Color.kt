@@ -6,6 +6,7 @@ import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.lerp
 
 /**
  * SysFlow brand palette.
@@ -119,6 +120,96 @@ internal object SysFlowPalette {
     val SurfaceContainerHighestDark = Color(0xFF323A35)
 }
 
+/**
+ * Per-module tone. Drives the hub/overview card colours *and* the module's detail pages
+ * (see ModuleTheme), so a module looks the same everywhere. CPU keeps the original brand teal.
+ * [accent] is drawn on top of [container] (meters, status dots); [warn] is the warning text
+ * colour that stays readable on that container; [tint] is the soft fill used by charts/tiles.
+ */
+@Immutable
+data class ModuleTone(
+    val container: Color,
+    val onContainer: Color,
+    val accent: Color,
+    val warn: Color,
+    val primary: Color,
+    val onPrimary: Color,
+    val secondaryContainer: Color,
+    val onSecondaryContainer: Color,
+    val tint: Color,
+)
+
+@Immutable
+data class ModuleTones(
+    val cpu: ModuleTone,
+    val battery: ModuleTone,
+    val mem: ModuleTone,
+    val storage: ModuleTone,
+    val process: ModuleTone,
+    val wakelock: ModuleTone,
+) {
+    fun forModule(id: String): ModuleTone? = when (id) {
+        "cpu" -> cpu
+        "battery" -> battery
+        "mem" -> mem
+        "storage" -> storage
+        "process" -> process
+        "wakelock" -> wakelock
+        else -> null
+    }
+}
+
+private fun lightTone(
+    container: Long, accent: Long, warn: Long, primary: Long, secC: Long, onSecC: Long,
+    tint: Color? = null,
+): ModuleTone {
+    val c = Color(container)
+    return ModuleTone(
+        container = c,
+        onContainer = Color(0xFFFFFFFF),
+        accent = Color(accent),
+        warn = Color(warn),
+        primary = Color(primary),
+        onPrimary = Color(0xFFFFFFFF),
+        secondaryContainer = Color(secC),
+        onSecondaryContainer = Color(onSecC),
+        tint = tint ?: lerp(c, Color.White, 0.62f),
+    )
+}
+
+private fun darkTone(
+    container: Long, onContainer: Long, accent: Long, warn: Long, primary: Long, onPrimary: Long,
+    secC: Long, onSecC: Long,
+): ModuleTone = ModuleTone(
+    container = Color(container),
+    onContainer = Color(onContainer),
+    accent = Color(accent),
+    warn = Color(warn),
+    primary = Color(primary),
+    onPrimary = Color(onPrimary),
+    secondaryContainer = Color(secC),
+    onSecondaryContainer = Color(onSecC),
+    tint = Color(container),
+)
+
+internal val LightModuleTones = ModuleTones(
+    cpu = lightTone(0xFF006B5B, 0xFF8CE9D1, 0xFFFFD76A, 0xFF004D41, 0xFFD7E5F8, 0xFF091D32, tint = Color(0xFF9FC4BC)),
+    battery = lightTone(0xFF8A5000, 0xFFFFC774, 0xFFFFC2B8, 0xFF6B3C00, 0xFFFFDDB8, 0xFF2B1700),
+    mem = lightTone(0xFF2A5EA8, 0xFFA9C8FF, 0xFFFFD76A, 0xFF0F4A8A, 0xFFD6E3FF, 0xFF001B3E),
+    storage = lightTone(0xFF6B4FA0, 0xFFD5BEFF, 0xFFFFD76A, 0xFF4F3787, 0xFFE9DDFF, 0xFF22005D),
+    process = lightTone(0xFFA23B5E, 0xFFFFB1C8, 0xFFFFE08A, 0xFF80274A, 0xFFFFD9E2, 0xFF3E001D),
+    wakelock = lightTone(0xFF5C6A00, 0xFFD2E26A, 0xFFFFD0C2, 0xFF464F00, 0xFFDDE98F, 0xFF191E00),
+)
+
+internal val DarkModuleTones = ModuleTones(
+    cpu = darkTone(0xFF005143, 0xFF9AF0D8, 0xFF79DCC2, 0xFFEFC16F, 0xFF79DCC2, 0xFF00382E, 0xFF364960, 0xFFD7E5F8),
+    battery = darkTone(0xFF5F3A00, 0xFFFFDDB3, 0xFFFFB95C, 0xFFFFB4A6, 0xFFFFB95C, 0xFF462A00, 0xFF5B3E14, 0xFFFFDDB8),
+    mem = darkTone(0xFF1B4A82, 0xFFD6E3FF, 0xFFA8C8FF, 0xFFEFC16F, 0xFFA8C8FF, 0xFF00305F, 0xFF304878, 0xFFD6E3FF),
+    storage = darkTone(0xFF4E3A82, 0xFFE9DDFF, 0xFFD0BCFF, 0xFFEFC16F, 0xFFD0BCFF, 0xFF381E72, 0xFF4D3E7D, 0xFFE9DDFF),
+    process = darkTone(0xFF7A2A47, 0xFFFFD9E2, 0xFFFFB1C8, 0xFFEFC16F, 0xFFFFB1C8, 0xFF5E1133, 0xFF6A3248, 0xFFFFD9E2),
+    wakelock = darkTone(0xFF4A5200, 0xFFE1EC9A, 0xFFC9D668, 0xFFFFB4A6, 0xFFC9D668, 0xFF2F3300, 0xFF454B1B, 0xFFE1EC9A),
+)
+
 /** Extra semantic colors for device telemetry states beyond the standard M3 roles. */
 @Immutable
 data class SysFlowExtendedColors(
@@ -139,6 +230,7 @@ data class SysFlowExtendedColors(
     val containerAccent: Color,
     /** Soft primary-tinted fill for charts/tiles that carry regular on-surface text. */
     val containerTint: Color,
+    val tones: ModuleTones,
 )
 
 internal val LightSysFlowExtendedColors = SysFlowExtendedColors(
@@ -157,6 +249,7 @@ internal val LightSysFlowExtendedColors = SysFlowExtendedColors(
     boost = Color(0xFF004D41),
     containerAccent = Color(0xFF8CE9D1),
     containerTint = Color(0xFF9FC4BC),
+    tones = LightModuleTones,
 )
 
 internal val DarkSysFlowExtendedColors = SysFlowExtendedColors(
@@ -175,6 +268,7 @@ internal val DarkSysFlowExtendedColors = SysFlowExtendedColors(
     boost = Color(0xFF79DCC2),
     containerAccent = Color(0xFF79DCC2),
     containerTint = Color(0xFF005143),
+    tones = DarkModuleTones,
 )
 
 internal val LocalSysFlowExtendedColors = staticCompositionLocalOf { LightSysFlowExtendedColors }

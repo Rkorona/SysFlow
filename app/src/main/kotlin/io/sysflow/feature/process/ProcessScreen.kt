@@ -51,6 +51,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -152,45 +153,18 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                     onEnterSelection = viewModel::enterSelectionWith,
                     onToggleSelected = viewModel::toggleSelected,
                     onOpen = viewModel::loadDetail,
-                )
-            }
-            // The KillMyApps-style one-tap clean: force-stops every unprotected app package in
-            // one shot; the module refuses protected processes and keeps the foreground app.
-            if (!state.selectionMode && list != null && "stop_all" in state.features) {
-                Surface(
-                    onClick = {
-                        if (state.actionRunning == null) {
-                            confirm = stopAllConfirm(list.stoppable) { viewModel.stopAll() }
+                    // The KillMyApps-style one-tap clean now lives in the list (a tile under the
+                    // filters) instead of a floating bar glued to the bottom edge.
+                    onStopAll = if ("stop_all" in state.features) {
+                        {
+                            if (state.actionRunning == null) {
+                                confirm = stopAllConfirm(list.stoppable) { viewModel.stopAll() }
+                            }
                         }
+                    } else {
+                        null
                     },
-                    modifier = Modifier
-                        .align(Alignment.BottomCenter)
-                        .padding(horizontal = 16.dp)
-                        .padding(bottom = 16.dp + bottomInset),
-                    shape = MaterialTheme.shapes.extraLarge,
-                    color = MaterialTheme.colorScheme.errorContainer,
-                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                    tonalElevation = 3.dp,
-                    shadowElevation = 6.dp,
-                ) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Icon(
-                            Icons.Rounded.DeleteForever,
-                            contentDescription = null,
-                            modifier = Modifier.size(20.dp),
-                        )
-                        Text("全部停止", style = MaterialTheme.typography.titleSmallEmphasized)
-                        Spacer(Modifier.weight(1f))
-                        Text(
-                            "${list.stoppable} 个应用",
-                            style = MaterialTheme.typography.bodySmall,
-                        )
-                    }
-                }
+                )
             }
             if (state.selectionMode && list != null) {
                 val selectedEntries = list.entries.filter { it.pid in state.selectedPids }
@@ -315,6 +289,10 @@ private fun TuningDialog(
     val scheme = MaterialTheme.colorScheme
     AlertDialog(
         onDismissRequest = onDismiss,
+        // The platform default width (~280 dp) leaves five numeric segments about 40 dp each, which
+        // truncated every label to "1…". Use the full width minus a 16 dp margin instead.
+        properties = DialogProperties(usePlatformDefaultWidth = false),
+        modifier = Modifier.padding(horizontal = 16.dp),
         shape = MaterialTheme.shapes.extraLarge,
         containerColor = scheme.surfaceContainerHigh,
         title = { Text("列表刷新", style = MaterialTheme.typography.headlineSmallEmphasized) },
@@ -325,8 +303,10 @@ private fun TuningDialog(
                     ConnectedChoiceRow(
                         options = ProcessTuning.POLL_CHOICES,
                         selected = pollMs,
-                        label = { "$it" },
+                        // Choices are stored in ms but the heading says seconds: 1000 → "1".
+                        label = { "${it / 1000}" },
                         onSelect = onPoll,
+                        compact = true,
                     )
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -336,6 +316,7 @@ private fun TuningDialog(
                         selected = sampleMs,
                         label = { "$it" },
                         onSelect = onSample,
+                        compact = true,
                     )
                 }
                 Text(

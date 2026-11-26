@@ -2,6 +2,8 @@
 
 package io.sysflow.feature.process
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -16,12 +18,15 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.DeleteForever
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.PlayArrow
@@ -51,11 +56,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.sysflow.core.ui.components.AppIcon
-import io.sysflow.core.ui.components.SegmentedValueList
 import io.sysflow.core.ui.components.StatusPill
 import io.sysflow.core.ui.components.StatusTone
 import io.sysflow.core.ui.components.rememberAppIdentities
@@ -160,8 +165,11 @@ internal fun ProcessDetailSheet(
             }
 
             SectionHeader(title = "进程信息")
-            SegmentedValueList(
-                rows = buildList {
+            // Short facts go in a two-column grid (half the height of one-row-per-field); the long
+            // strings (cgroup path, command line, shared packages) sit in a collapsed block so they
+            // no longer squeeze their label into a sliver or push the actions off screen.
+            InfoGrid(
+                items = buildList {
                     add("PID / PPID" to "${detail.pid} / ${detail.ppid}")
                     add("UID / 用户" to "${detail.uid} / user ${detail.user}")
                     add("线程" to detail.threads.toString())
@@ -175,15 +183,23 @@ internal fun ProcessDetailSheet(
                     )
                     add("SwapPss" to formatProcessKb(detail.swapPssKb))
                     add("oom_score_adj" to (detail.oomScoreAdj?.toString() ?: "—"))
-                    add("调度优先级 nice" to detail.nice.toString())
+                    add("nice" to detail.nice.toString())
                     add(
-                        "调度策略" to "${schedPolicyLabel(detail.policy, detail.policyName)} (${detail.policy}) · 实时优先级 ${detail.rtPriority}",
+                        "调度策略" to "${schedPolicyLabel(detail.policy, detail.policyName)} (${detail.policy}) · RT ${detail.rtPriority}",
                     )
-                    add("cgroup" to (detail.cgroup ?: "—"))
                     add("cpuset" to (detail.cpuset ?: "—"))
-                    if (detail.cmdline.isNotEmpty()) add("命令行" to detail.cmdline.joinToString(" "))
-                    if (detail.packages.size > 1) add("共享包名" to detail.packages.joinToString("\n"))
                 },
+            )
+            val longRows = buildList {
+                add("cgroup" to (detail.cgroup ?: "—"))
+                if (detail.cmdline.isNotEmpty()) add("命令行" to detail.cmdline.joinToString(" "))
+                if (detail.packages.size > 1) add("共享包名" to detail.packages.joinToString("\n"))
+            }
+            ExpandableInfo(
+                title = "更多信息",
+                summary = longRows.joinToString(" · ") { it.first },
+                rows = longRows,
+                resetKey = detail.pid,
             )
 
             DetailActions(
@@ -247,8 +263,134 @@ private fun DetailHeader(
     }
 }
 
+// ---- info ------------------------------------------------------------------------------------
+
+/**
+ * Two-column grid of short label/value tiles. An odd last tile and the full-width ones (long
+ * values) take the whole row, so nothing is squeezed to make the grid even.
+ */
+@Composable
+private fun InfoGrid(items: List<Pair<String, String>>, modifier: Modifier = Modifier) {
+    Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        // A value this long would wrap badly in a half-width tile.
+        val (wide, narrow) = items.partition { it.second.length > 18 }
+        narrow.chunked(2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                row.forEach { (label, value) -> InfoTile(label, value, Modifier.weight(1f)) }
+                if (row.size == 1) Spacer(Modifier.weight(1f))
+            }
+        }
+        wide.forEach { (label, value) -> InfoTile(label, value, Modifier.fillMaxWidth()) }
+    }
+}
+
+@Composable
+private fun InfoTile(label: String, value: String, modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.medium,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+    ) {
+        Column(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Text(
+                label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+            Text(
+                value,
+                style = MaterialTheme.typography.titleSmallEmphasized,
+                color = MaterialTheme.colorScheme.onSurface,
+            )
+        }
+    }
+}
+
+/**
+ * Collapsed-by-default block for long values. Each row stacks label over value (monospace, wraps
+ * at any character, selectable so a command line can be copied) instead of sharing one line.
+ */
+@Composable
+private fun ExpandableInfo(
+    title: String,
+    summary: String,
+    rows: List<Pair<String, String>>,
+    resetKey: Any,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by rememberSaveable(resetKey) { mutableStateOf(false) }
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.large,
+        color = scheme.surfaceContainerHigh,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { expanded = !expanded }
+                    .padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(title, style = MaterialTheme.typography.titleSmallEmphasized)
+                    Text(
+                        summary,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = scheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                Icon(
+                    if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    tint = scheme.onSurfaceVariant,
+                )
+            }
+            AnimatedVisibility(visible = expanded) {
+                SelectionContainer {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(start = 16.dp, end = 16.dp, bottom = 14.dp),
+                        verticalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        rows.forEach { (label, value) ->
+                            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                                Text(
+                                    label,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = scheme.onSurfaceVariant,
+                                )
+                                Text(
+                                    value,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    fontFamily = FontFamily.Monospace,
+                                    color = scheme.onSurface,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---- actions ---------------------------------------------------------------------------------
 
+/**
+ * The action area is a connected list of collapsible groups (one open at a time) instead of a stack
+ * of always-open cards: with the experimental switch on there are up to five groups, and fully
+ * expanded they were several screens tall. Collapsed, each group shows only its current value.
+ */
 @Composable
 private fun DetailActions(
     detail: ProcessDetail,
@@ -269,6 +411,20 @@ private fun DetailActions(
     val busy = runningLabel != null
     val packageTarget = detail.packageName
     val target = if (scopeByPackage && packageTarget != null) packageTarget else detail.pid.toString()
+    var openGroup by rememberSaveable(detail.pid) { mutableStateOf<String?>(null) }
+
+    val hasNice = "renice" in features
+    val hasOom = experimental && "oom_score_adj" in features
+    val hasSched = experimental && "sched" in features
+    val hasCpuset = experimental && "cpuset" in features && groups.isNotEmpty()
+    val hasFreeze = experimental && "freeze" in features
+    val keys = buildList {
+        if (hasNice) add("nice")
+        if (hasOom) add("oom")
+        if (hasSched) add("sched")
+        if (hasCpuset) add("cpuset")
+        if (hasFreeze) add("freeze")
+    }
 
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
         SectionHeader(title = "操作", supporting = "均为一次性操作，系统可能随后改回")
@@ -311,181 +467,89 @@ private fun DetailActions(
 
         if (busy) BusyTile(label = runningLabel.orEmpty())
 
-        if ("stop" in features && packageTarget != null) {
-            Button(
-                onClick = { onStop(packageTarget, detail.user) },
-                enabled = !busy,
-                modifier = Modifier.fillMaxWidth(),
-                shapes = ButtonDefaults.shapes(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = scheme.errorContainer,
-                    contentColor = scheme.onErrorContainer,
-                ),
-            ) {
-                Icon(
-                    Icons.Rounded.DeleteForever,
-                    contentDescription = null,
-                    modifier = Modifier.size(ButtonDefaults.IconSize),
-                )
-                Spacer(Modifier.size(ButtonDefaults.IconSpacing))
-                Text("强制停止应用", maxLines = 1)
-            }
-        }
-
-        if ("renice" in features) {
-            var niceText by rememberSaveable(detail.pid, detail.nice) {
-                mutableStateOf(detail.nice.toString())
-            }
-            val parsedNice = niceText.toIntOrNull()
-            val niceValid = parsedNice != null && parsedNice in -20..19
-
-            SectionSurface {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+        // Connected list: the groups touch (4 dp gaps) and only the outer corners stay large.
+        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+            if (hasNice) {
+                var niceText by rememberSaveable(detail.pid, detail.nice) {
+                    mutableStateOf(detail.nice.toString())
+                }
+                ExpandableActionCard(
+                    expanded = openGroup == "nice",
+                    onToggle = { openGroup = if (openGroup == "nice") null else "nice" },
+                    icon = Icons.Rounded.Speed,
+                    title = "调度优先级 nice",
+                    supporting = "当前 ${detail.nice} · 越小越优先",
+                    position = keys.indexOf("nice"),
+                    count = keys.size,
                 ) {
-                    ActionGroupHeader(
-                        icon = Icons.Rounded.Speed,
-                        title = "调度优先级 nice",
-                        supporting = "越小越优先，当前 ${detail.nice}",
+                    NumberAdjuster(
+                        presets = listOf(-10, -5, 0, 5, 10),
+                        current = detail.nice,
+                        text = niceText,
+                        onTextChange = { niceText = it },
+                        range = -20..19,
+                        maxLen = 3,
+                        busy = busy,
+                        applyEvenIfSame = scopeByPackage,
+                        onApply = { onRenice(target, it) },
                     )
-                    ConnectedChoiceRow(
-                        options = listOf(-10, -5, 0, 5, 10),
-                        selected = detail.nice,
-                        label = { it.toString() },
-                        onSelect = { value -> if (scopeByPackage || value != detail.nice) onRenice(target, value) },
-                        enabled = !busy,
-                        compact = true,
-                    )
-                    Slider(
-                        value = (parsedNice ?: detail.nice).coerceIn(-20, 19).toFloat(),
-                        onValueChange = { niceText = it.roundToInt().toString() },
-                        valueRange = -20f..19f,
-                        enabled = !busy,
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilledTonalIconButton(
-                            onClick = { niceText = toggleNumberSign(niceText) },
-                            enabled = !busy,
-                        ) {
-                            Text("±", style = MaterialTheme.typography.titleMediumEmphasized)
-                        }
-                        OutlinedTextField(
-                            value = niceText,
-                            onValueChange = { niceText = filterSignedDigits(it, 3) },
-                            label = { Text("自定义 (-20..19)") },
-                            isError = niceText.isNotEmpty() && !niceValid,
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                            modifier = Modifier.weight(1f),
-                        )
-                        FilledTonalButton(
-                            onClick = { parsedNice?.let { onRenice(target, it) } },
-                            enabled = !busy && niceValid && (scopeByPackage || parsedNice != detail.nice),
-                            shapes = ButtonDefaults.shapes(),
-                        ) {
-                            Text("应用", maxLines = 1)
-                        }
-                    }
                 }
             }
-        }
 
-        if (experimental && "oom_score_adj" in features) {
-            var oomText by rememberSaveable(detail.pid, detail.oomScoreAdj) {
-                mutableStateOf((detail.oomScoreAdj ?: 0).toString())
-            }
-            val parsedOom = oomText.toIntOrNull()
-            val oomValid = parsedOom != null && parsedOom in -1000..1000
-
-            SectionSurface {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+            if (hasOom) {
+                var oomText by rememberSaveable(detail.pid, detail.oomScoreAdj) {
+                    mutableStateOf((detail.oomScoreAdj ?: 0).toString())
+                }
+                ExpandableActionCard(
+                    expanded = openGroup == "oom",
+                    onToggle = { openGroup = if (openGroup == "oom") null else "oom" },
+                    icon = Icons.Rounded.Tune,
+                    title = "oom_score_adj",
+                    supporting = "高风险 · 当前 ${detail.oomScoreAdj ?: "—"}",
+                    position = keys.indexOf("oom"),
+                    count = keys.size,
+                    badgeContainer = scheme.errorContainer,
+                    badgeContent = scheme.onErrorContainer,
                 ) {
-                    ActionGroupHeader(
-                        icon = Icons.Rounded.Tune,
-                        title = "oom_score_adj",
-                        supporting = "高风险 · 当前 ${detail.oomScoreAdj ?: "—"}",
-                        container = scheme.errorContainer,
-                        content = scheme.onErrorContainer,
+                    NumberAdjuster(
+                        presets = listOf(-1000, 0, 100, 500),
+                        current = detail.oomScoreAdj,
+                        text = oomText,
+                        onTextChange = { oomText = it },
+                        range = -1000..1000,
+                        maxLen = 5,
+                        busy = busy,
+                        applyEvenIfSame = scopeByPackage,
+                        onApply = { onOom(target, it) },
                     )
-                    ConnectedChoiceRow(
-                        options = listOf(-1000, 0, 100, 500),
-                        selected = detail.oomScoreAdj,
-                        label = { it.toString() },
-                        onSelect = { value -> if (scopeByPackage || value != detail.oomScoreAdj) onOom(target, value) },
-                        enabled = !busy,
-                        compact = true,
-                    )
-                    Slider(
-                        value = (parsedOom ?: detail.oomScoreAdj ?: 0).coerceIn(-1000, 1000).toFloat(),
-                        onValueChange = { oomText = it.roundToInt().toString() },
-                        valueRange = -1000f..1000f,
-                        enabled = !busy,
-                    )
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        FilledTonalIconButton(
-                            onClick = { oomText = toggleNumberSign(oomText) },
-                            enabled = !busy,
-                        ) {
-                            Text("±", style = MaterialTheme.typography.titleMediumEmphasized)
-                        }
-                        OutlinedTextField(
-                            value = oomText,
-                            onValueChange = { oomText = filterSignedDigits(it, 5) },
-                            label = { Text("自定义 (-1000..1000)") },
-                            isError = oomText.isNotEmpty() && !oomValid,
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
-                            modifier = Modifier.weight(1f),
-                        )
-                        FilledTonalButton(
-                            onClick = { parsedOom?.let { onOom(target, it) } },
-                            enabled = !busy && oomValid && (scopeByPackage || parsedOom != detail.oomScoreAdj),
-                            shapes = ButtonDefaults.shapes(),
-                        ) {
-                            Text("应用", maxLines = 1)
-                        }
-                    }
                 }
             }
-        }
 
-        if (experimental && "sched" in features) {
-            var selectedPolicy by rememberSaveable(detail.pid, detail.policy) {
-                mutableIntStateOf(if (detail.policy in listOf(0, 1, 2, 3, 5)) detail.policy else 0)
-            }
-            var rtPrioText by rememberSaveable(detail.pid, detail.rtPriority) {
-                mutableStateOf((if (detail.rtPriority in 1..99) detail.rtPriority else 10).toString())
-            }
-            val isRt = isRealtimeSchedPolicy(selectedPolicy)
-            val parsedRtPrio = rtPrioText.toIntOrNull()
-            val rtPrioValid = !isRt || (parsedRtPrio != null && parsedRtPrio in 1..99)
-            val schedChanged = scopeByPackage ||
-                selectedPolicy != detail.policy ||
-                (isRt && parsedRtPrio != detail.rtPriority)
+            if (hasSched) {
+                var selectedPolicy by rememberSaveable(detail.pid, detail.policy) {
+                    mutableIntStateOf(if (detail.policy in listOf(0, 1, 2, 3, 5)) detail.policy else 0)
+                }
+                var rtPrioText by rememberSaveable(detail.pid, detail.rtPriority) {
+                    mutableStateOf((if (detail.rtPriority in 1..99) detail.rtPriority else 10).toString())
+                }
+                val isRt = isRealtimeSchedPolicy(selectedPolicy)
+                val parsedRtPrio = rtPrioText.toIntOrNull()
+                val rtPrioValid = !isRt || (parsedRtPrio != null && parsedRtPrio in 1..99)
+                val schedChanged = scopeByPackage ||
+                    selectedPolicy != detail.policy ||
+                    (isRt && parsedRtPrio != detail.rtPriority)
 
-            SectionSurface {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+                ExpandableActionCard(
+                    expanded = openGroup == "sched",
+                    onToggle = { openGroup = if (openGroup == "sched") null else "sched" },
+                    icon = Icons.Rounded.Bolt,
+                    title = "实时调度策略",
+                    supporting = "高风险 · 当前 ${schedPolicyLabel(detail.policy, detail.policyName)} (${detail.rtPriority})",
+                    position = keys.indexOf("sched"),
+                    count = keys.size,
+                    badgeContainer = scheme.errorContainer,
+                    badgeContent = scheme.onErrorContainer,
                 ) {
-                    ActionGroupHeader(
-                        icon = Icons.Rounded.Bolt,
-                        title = "实时调度策略",
-                        supporting = "高风险 · 当前 ${schedPolicyLabel(detail.policy, detail.policyName)} (${detail.rtPriority})",
-                        container = scheme.errorContainer,
-                        content = scheme.onErrorContainer,
-                    )
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         ConnectedChoiceRow(
                             options = listOf(0, 3, 5),
@@ -505,31 +569,33 @@ private fun DetailActions(
                             slots = 3,
                         )
                     }
-                    if (isRt) {
-                        ConnectedChoiceRow(
-                            options = listOf(1, 10, 50, 99),
-                            selected = parsedRtPrio,
-                            label = { it.toString() },
-                            onSelect = { rtPrioText = it.toString() },
-                            enabled = !busy,
-                            compact = true,
-                        )
-                        Slider(
-                            value = (parsedRtPrio ?: 10).coerceIn(1, 99).toFloat(),
-                            onValueChange = { rtPrioText = it.roundToInt().toString() },
-                            valueRange = 1f..99f,
-                            enabled = !busy,
-                        )
-                        OutlinedTextField(
-                            value = rtPrioText,
-                            onValueChange = { rtPrioText = it.filter(Char::isDigit).take(2) },
-                            label = { Text("实时优先级 (1..99)") },
-                            isError = rtPrioText.isNotEmpty() && !rtPrioValid,
-                            singleLine = true,
-                            enabled = !busy,
-                            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                            modifier = Modifier.fillMaxWidth(),
-                        )
+                    AnimatedVisibility(visible = isRt) {
+                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                            ConnectedChoiceRow(
+                                options = listOf(1, 10, 50, 99),
+                                selected = parsedRtPrio,
+                                label = { it.toString() },
+                                onSelect = { rtPrioText = it.toString() },
+                                enabled = !busy,
+                                compact = true,
+                            )
+                            Slider(
+                                value = (parsedRtPrio ?: 10).coerceIn(1, 99).toFloat(),
+                                onValueChange = { rtPrioText = it.roundToInt().toString() },
+                                valueRange = 1f..99f,
+                                enabled = !busy,
+                            )
+                            OutlinedTextField(
+                                value = rtPrioText,
+                                onValueChange = { rtPrioText = it.filter(Char::isDigit).take(2) },
+                                label = { Text("实时优先级 (1..99)") },
+                                isError = rtPrioText.isNotEmpty() && !rtPrioValid,
+                                singleLine = true,
+                                enabled = !busy,
+                                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                                modifier = Modifier.fillMaxWidth(),
+                            )
+                        }
                     }
                     Button(
                         onClick = {
@@ -543,21 +609,19 @@ private fun DetailActions(
                     }
                 }
             }
-        }
 
-        if (experimental && "cpuset" in features && groups.isNotEmpty()) {
-            SectionSurface {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+            if (hasCpuset) {
+                ExpandableActionCard(
+                    expanded = openGroup == "cpuset",
+                    onToggle = { openGroup = if (openGroup == "cpuset") null else "cpuset" },
+                    icon = Icons.Rounded.AccountTree,
+                    title = "cpuset 绑核",
+                    supporting = "当前 ${detail.cpuset ?: "—"}",
+                    position = keys.indexOf("cpuset"),
+                    count = keys.size,
+                    badgeContainer = scheme.tertiaryContainer,
+                    badgeContent = scheme.onTertiaryContainer,
                 ) {
-                    ActionGroupHeader(
-                        icon = Icons.Rounded.AccountTree,
-                        title = "cpuset 绑核",
-                        supporting = "当前 ${detail.cpuset ?: "—"}",
-                        container = scheme.tertiaryContainer,
-                        content = scheme.onTertiaryContainer,
-                    )
                     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                         groups.chunked(2).forEach { row ->
                             ConnectedChoiceRow(
@@ -575,26 +639,24 @@ private fun DetailActions(
                     }
                 }
             }
-        }
 
-        if (experimental && "freeze" in features) {
-            val freezeStatus = when (detail.frozen) {
-                true -> "当前：已冻结 · 系统可能随时解冻"
-                false -> "当前：运行中 · 冻结后应用停止运行"
-                null -> "状态未知 · 冻结后应用不运行，系统可能随时解冻"
-            }
-            SectionSurface {
-                Column(
-                    modifier = Modifier.padding(16.dp),
-                    verticalArrangement = Arrangement.spacedBy(14.dp),
+            if (hasFreeze) {
+                val freezeStatus = when (detail.frozen) {
+                    true -> "已冻结 · 系统可能随时解冻"
+                    false -> "运行中 · 冻结后应用停止运行"
+                    null -> "状态未知 · 系统可能随时解冻"
+                }
+                ExpandableActionCard(
+                    expanded = openGroup == "freeze",
+                    onToggle = { openGroup = if (openGroup == "freeze") null else "freeze" },
+                    icon = Icons.Rounded.Bedtime,
+                    title = "冻结",
+                    supporting = "高风险 · $freezeStatus",
+                    position = keys.indexOf("freeze"),
+                    count = keys.size,
+                    badgeContainer = scheme.errorContainer,
+                    badgeContent = scheme.onErrorContainer,
                 ) {
-                    ActionGroupHeader(
-                        icon = Icons.Rounded.Bedtime,
-                        title = "冻结",
-                        supporting = freezeStatus,
-                        container = scheme.errorContainer,
-                        content = scheme.onErrorContainer,
-                    )
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Button(
                             onClick = { onFreeze(target, true) },
@@ -629,8 +691,92 @@ private fun DetailActions(
             }
         }
 
+        // Destructive and rarely needed: kept apart from the tuning list, at the very end.
+        if ("stop" in features && packageTarget != null) {
+            Button(
+                onClick = { onStop(packageTarget, detail.user) },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+                shapes = ButtonDefaults.shapes(),
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = scheme.errorContainer,
+                    contentColor = scheme.onErrorContainer,
+                ),
+            ) {
+                Icon(
+                    Icons.Rounded.DeleteForever,
+                    contentDescription = null,
+                    modifier = Modifier.size(ButtonDefaults.IconSize),
+                )
+                Spacer(Modifier.size(ButtonDefaults.IconSpacing))
+                Text("强制停止应用", maxLines = 1)
+            }
+        }
+
         if (features.isEmpty()) {
             NoteTile(text = "模块未报告任何动作能力，本机只能查看。")
+        }
+    }
+}
+
+/**
+ * Preset segments + slider + custom field for one bounded integer. Shared by nice and
+ * oom_score_adj, which used to carry two copies of this block.
+ */
+@Composable
+private fun NumberAdjuster(
+    presets: List<Int>,
+    current: Int?,
+    text: String,
+    onTextChange: (String) -> Unit,
+    range: IntRange,
+    maxLen: Int,
+    busy: Boolean,
+    applyEvenIfSame: Boolean,
+    onApply: (Int) -> Unit,
+) {
+    val parsed = text.toIntOrNull()
+    val valid = parsed != null && parsed in range
+    ConnectedChoiceRow(
+        options = presets,
+        selected = current,
+        label = { it.toString() },
+        onSelect = { value -> if (applyEvenIfSame || value != current) onApply(value) },
+        enabled = !busy,
+        compact = true,
+    )
+    Slider(
+        value = (parsed ?: current ?: 0).coerceIn(range.first, range.last).toFloat(),
+        onValueChange = { onTextChange(it.roundToInt().toString()) },
+        valueRange = range.first.toFloat()..range.last.toFloat(),
+        enabled = !busy,
+    )
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        FilledTonalIconButton(
+            onClick = { onTextChange(toggleNumberSign(text)) },
+            enabled = !busy,
+        ) {
+            Text("±", style = MaterialTheme.typography.titleMediumEmphasized)
+        }
+        OutlinedTextField(
+            value = text,
+            onValueChange = { onTextChange(filterSignedDigits(it, maxLen)) },
+            label = { Text("自定义 (${range.first}..${range.last})") },
+            isError = text.isNotEmpty() && !valid,
+            singleLine = true,
+            enabled = !busy,
+            keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Ascii),
+            modifier = Modifier.weight(1f),
+        )
+        FilledTonalButton(
+            onClick = { parsed?.let(onApply) },
+            enabled = !busy && valid && (applyEvenIfSame || parsed != current),
+            shapes = ButtonDefaults.shapes(),
+        ) {
+            Text("应用", maxLines = 1)
         }
     }
 }

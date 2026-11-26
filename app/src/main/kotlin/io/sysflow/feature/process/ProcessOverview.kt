@@ -21,6 +21,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
 import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.ChevronRight
+import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Memory
@@ -87,6 +89,7 @@ internal fun ProcessListContent(
     onEnterSelection: (Int) -> Unit,
     onToggleSelected: (Int) -> Unit,
     onOpen: (Int) -> Unit,
+    onStopAll: (() -> Unit)? = null,
 ) {
     val foregroundPackage = list.foreground.packageName
     val packages = remember(list.entries, foregroundPackage) {
@@ -102,11 +105,8 @@ internal fun ProcessListContent(
             start = 16.dp,
             end = 16.dp,
             top = 8.dp,
-            bottom = (when {
-                state.selectionMode -> 104.dp
-                "stop_all" in state.features -> 88.dp
-                else -> 24.dp
-            }) + bottomInset,
+            // Only the multi-select toolbar floats over the list now.
+            bottom = (if (state.selectionMode) 104.dp else 24.dp) + bottomInset,
         ),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -156,6 +156,17 @@ internal fun ProcessListContent(
                     enabled = state.experimental,
                     features = state.features,
                     onToggle = onToggleExperimental,
+                    modifier = Modifier.padding(bottom = 8.dp),
+                )
+            }
+        }
+
+        if (onStopAll != null && !state.selectionMode) {
+            item(key = "stop-all") {
+                StopAllTile(
+                    count = list.stoppable,
+                    enabled = state.actionRunning == null && list.stoppable > 0,
+                    onClick = onStopAll,
                     modifier = Modifier.padding(bottom = 8.dp),
                 )
             }
@@ -531,6 +542,62 @@ private fun ExperimentalTile(
                 )
             }
             Switch(checked = enabled, onCheckedChange = { onToggle() })
+        }
+    }
+}
+
+/**
+ * One-tap clean, as a regular tile in the list flow: error-tinted badge + what it does + the count,
+ * so it reads as an action card like 实验功能 rather than a floating bar over the rows.
+ */
+@Composable
+private fun StopAllTile(
+    count: Int,
+    enabled: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val scheme = MaterialTheme.colorScheme
+    Surface(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = modifier.fillMaxWidth(),
+        shape = MaterialTheme.shapes.extraLarge,
+        color = scheme.surfaceContainerHigh,
+        contentColor = scheme.onSurface,
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 16.dp, vertical = 14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(44.dp)
+                    .clip(MaterialShapes.Cookie9Sided.toShape())
+                    .background(scheme.errorContainer),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(
+                    Icons.Rounded.DeleteForever,
+                    contentDescription = null,
+                    tint = scheme.onErrorContainer,
+                    modifier = Modifier.size(22.dp),
+                )
+            }
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                Text("全部停止", style = MaterialTheme.typography.titleMediumEmphasized)
+                Text(
+                    "一次性强停 $count 个未受保护的应用",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.Rounded.ChevronRight,
+                contentDescription = null,
+                tint = scheme.onSurfaceVariant,
+            )
         }
     }
 }

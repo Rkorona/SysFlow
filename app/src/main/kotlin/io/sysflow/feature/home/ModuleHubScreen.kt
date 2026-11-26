@@ -24,6 +24,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import io.sysflow.core.model.CapsData
+import io.sysflow.core.ui.theme.sysFlowColors
 
 @Composable
 fun ModuleHubScreen(
@@ -76,6 +77,7 @@ fun ModuleHubScreen(
                         subtitle = "核心 · 频率 · 调度",
                         icon = Icons.Rounded.Memory,
                         ready = cpuReady,
+                        tone = MaterialTheme.sysFlowColors.tones.cpu,
                         onClick = if (cpuReady) onOpenCpu else null,
                     )
                     ModuleFeatureCard(
@@ -84,6 +86,7 @@ fun ModuleHubScreen(
                         subtitle = "电量 · 温度 · 健康度",
                         icon = Icons.Rounded.BatteryFull,
                         ready = batterySupported,
+                        tone = MaterialTheme.sysFlowColors.tones.battery,
                         onClick = if (batterySupported) onOpenBattery else null,
                     )
                 }
@@ -94,6 +97,7 @@ fun ModuleHubScreen(
                         subtitle = "占用 · 回收 · 压力",
                         icon = Icons.Rounded.Dns,
                         ready = memSupported,
+                        tone = MaterialTheme.sysFlowColors.tones.mem,
                         onClick = if (memSupported) onOpenMem else null,
                     )
                     ModuleFeatureCard(
@@ -102,6 +106,7 @@ fun ModuleHubScreen(
                         subtitle = "空间 · 文件 · I/O",
                         icon = Icons.Rounded.FolderOpen,
                         ready = storageSupported,
+                        tone = MaterialTheme.sysFlowColors.tones.storage,
                         onClick = if (storageSupported) onOpenStorage else null,
                     )
                 }
@@ -112,6 +117,7 @@ fun ModuleHubScreen(
                         subtitle = "进程 · 资源 · 优先级",
                         icon = Icons.Rounded.Timeline,
                         ready = processSupported,
+                        tone = MaterialTheme.sysFlowColors.tones.process,
                         onClick = if (processSupported) onOpenProcess else null,
                     )
                     ModuleFeatureCard(
@@ -120,6 +126,7 @@ fun ModuleHubScreen(
                         subtitle = "唤醒源 · 持锁 · 拦截",
                         icon = Icons.Rounded.Lock,
                         ready = wakelockReady,
+                        tone = MaterialTheme.sysFlowColors.tones.wakelock,
                         onClick = if (wakelockReady) onOpenWakelock else null,
                     )
                 }

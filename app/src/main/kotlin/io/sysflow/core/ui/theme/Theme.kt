@@ -6,6 +6,7 @@ import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.MaterialExpressiveTheme
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MotionScheme
 import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.Shapes
@@ -170,5 +171,47 @@ fun SysFlowTheme(
                 content()
             }
         }
+    }
+}
+
+/**
+ * Re-themes a module's screens with that module's tone, so detail pages share the colours of
+ * the hub/overview card (primary, containers, charts, meters). Unknown ids pass through.
+ */
+@Composable
+fun ModuleTheme(moduleId: String, content: @Composable () -> Unit) {
+    val ext = MaterialTheme.sysFlowColors
+    val tone = ext.tones.forModule(moduleId)
+    if (tone == null) {
+        content()
+        return
+    }
+    val scheme = MaterialTheme.colorScheme.copy(
+        primary = tone.primary,
+        onPrimary = tone.onPrimary,
+        primaryContainer = tone.container,
+        onPrimaryContainer = tone.onContainer,
+        inversePrimary = tone.accent,
+        secondaryContainer = tone.secondaryContainer,
+        onSecondaryContainer = tone.onSecondaryContainer,
+        surfaceTint = tone.primary,
+        primaryFixed = tone.container,
+        primaryFixedDim = tone.primary,
+        onPrimaryFixed = tone.onContainer,
+        onPrimaryFixedVariant = tone.accent,
+    )
+    val toned = ext.copy(
+        boost = tone.primary,
+        containerAccent = tone.accent,
+        containerTint = tone.tint,
+    )
+    CompositionLocalProvider(LocalSysFlowExtendedColors provides toned) {
+        MaterialExpressiveTheme(
+            colorScheme = scheme,
+            motionScheme = MaterialTheme.motionScheme,
+            shapes = MaterialTheme.shapes,
+            typography = MaterialTheme.typography,
+            content = content,
+        )
     }
 }

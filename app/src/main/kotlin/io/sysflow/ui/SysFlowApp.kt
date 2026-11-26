@@ -63,6 +63,7 @@ import io.sysflow.feature.settings.SettingsScreen
 import io.sysflow.feature.mem.MemScreen
 import io.sysflow.feature.process.ProcessScreen
 import io.sysflow.feature.storage.StorageScreen
+import io.sysflow.core.ui.theme.ModuleTheme
 import io.sysflow.feature.wakelock.WakelockScreen
 import io.sysflow.ui.navigation.Destination
 import io.sysflow.ui.navigation.FloatingNavBar
@@ -318,28 +319,43 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                     )
                 }
             }
-            route.destination == Destination.Modules && route.wakelockDetail -> WakelockScreen()
-            route.destination == Destination.Modules && route.memDetail -> MemScreen()
-            route.destination == Destination.Modules && route.processDetail -> ProcessScreen()
-            route.destination == Destination.Modules && route.storageDetail -> StorageScreen()
+            route.destination == Destination.Modules && route.wakelockDetail ->
+                ModuleTheme("wakelock") { WakelockScreen() }
+            route.destination == Destination.Modules && route.memDetail ->
+                ModuleTheme("mem") { MemScreen() }
+            route.destination == Destination.Modules && route.processDetail ->
+                ModuleTheme("process") { ProcessScreen() }
+            route.destination == Destination.Modules && route.storageDetail ->
+                ModuleTheme("storage") { StorageScreen() }
             route.destination == Destination.Modules && route.batteryDetail && route.batteryRankingOpen ->
-                BatteryRankingScreen(loadApps = { refresh -> viewModel.loadBatteryApps(refresh) })
-            route.destination == Destination.Modules && route.batteryDetail -> BatteryScreen(
-                battery = battery,
-                refreshTick = state.snapshot?.ts ?: 0L,
-                loadApps = { refresh -> viewModel.loadBatteryApps(refresh) },
-                loadHealth = { refresh -> viewModel.loadBatteryHealth(refresh) },
-                loadHistory = { viewModel.loadBatteryHistory() },
-                onOpenRanking = { batteryRankingOpen = true },
-            )
-            route.destination == Destination.Modules && route.cpuDetail && route.cpusetDetail -> CpusetScreen()
-            route.destination == Destination.Modules && route.cpuDetail && route.screenOffDetail -> ScreenOffScreen()
-            route.destination == Destination.Modules && route.cpuDetail && route.adaptiveDetail -> AdaptiveScreen()
-            route.destination == Destination.Modules && route.cpuDetail -> CpuScreen(
-                onOpenAdaptive = { adaptiveDetail = true },
-                onOpenCpuset = { cpusetDetail = true },
-                onOpenScreenOff = { screenOffDetail = true },
-            )
+                ModuleTheme("battery") {
+                    BatteryRankingScreen(loadApps = { refresh -> viewModel.loadBatteryApps(refresh) })
+                }
+            route.destination == Destination.Modules && route.batteryDetail ->
+                ModuleTheme("battery") {
+                    BatteryScreen(
+                        battery = battery,
+                        refreshTick = state.snapshot?.ts ?: 0L,
+                        loadApps = { refresh -> viewModel.loadBatteryApps(refresh) },
+                        loadHealth = { refresh -> viewModel.loadBatteryHealth(refresh) },
+                        loadHistory = { viewModel.loadBatteryHistory() },
+                        onOpenRanking = { batteryRankingOpen = true },
+                    )
+                }
+            route.destination == Destination.Modules && route.cpuDetail && route.cpusetDetail ->
+                ModuleTheme("cpu") { CpusetScreen() }
+            route.destination == Destination.Modules && route.cpuDetail && route.screenOffDetail ->
+                ModuleTheme("cpu") { ScreenOffScreen() }
+            route.destination == Destination.Modules && route.cpuDetail && route.adaptiveDetail ->
+                ModuleTheme("cpu") { AdaptiveScreen() }
+            route.destination == Destination.Modules && route.cpuDetail ->
+                ModuleTheme("cpu") {
+                    CpuScreen(
+                        onOpenAdaptive = { adaptiveDetail = true },
+                        onOpenCpuset = { cpusetDetail = true },
+                        onOpenScreenOff = { screenOffDetail = true },
+                    )
+                }
             route.destination == Destination.Modules -> {
                 val caps = state.caps
                 if (caps != null) {
