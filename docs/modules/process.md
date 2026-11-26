@@ -4,12 +4,11 @@ Implementation: `core/sysflow-modules/src/process/` (planned: `mod.rs`, `scan.rs
 `actions.rs`, `tests.rs`). Protocol: `docs/protocol.md` §3.25. Plan and decisions:
 `docs/process-module-plan.md`.
 
-> **Status: Steps 1–5 implemented on the host (device probe 2026-11-25); device acceptance is
-> pending.** The read-only verbs (`list` / `get`), the protection gate and the one-shot actions
-> (`stop` / `oom` / `renice` / `cpuset` / `freeze` / `unfreeze`) are covered by host tests against a
-> fake `/proc`; the APK page code is written against the same protocol (the APK is built by the
-> device owner). The write path has **not** been exercised on the device yet — that is checklist
-> item 1 below.
+> **Status: Steps 1–5 implemented; the action write path was verified on the S25 on 2026-11-26
+> (v0.2.3).** `oom`, `renice`, `cpuset`, `freeze`/`unfreeze` and `stop` all worked and read back
+> correctly, and the protection gate rejected `com.android.systemui`. The remaining items are listed
+> under **Device checklist**. The APK page code is written against the same protocol (the APK is
+> built by the device owner).
 
 This document is updated at the end of **every** step with the measured value or the reason a path
 was dropped. The read-only half is safe (no writes); the action half is one-shot and never touches
@@ -31,10 +30,10 @@ Reference device for earlier steps: Samsung S25 (same device as `docs/modules/me
 | PSS / SwapPss (detail only) | `/proc/<pid>/smaps_rollup` | `pss_kb` / `swap_pss_kb` omitted | not probed yet (Step 2 detail path) |
 | UID → package | `/data/system/packages.list` → `cmd package list packages -U` | `package:null`, label falls back to AID / `UID <n>` | **readable**, **698** lines, **10** columns; first line `com.google.android.networkstack.tethering 1073 …` |
 | foreground activity | `dumpsys activity activities` (`topResumedActivity` → `mResumedActivity`, 3 s timeout) | `foreground.available:false` | `topResumedActivity=ActivityRecord{172310012 u0 com.server.auditor.ssh.client/.ssh.terminal.TerminalActivity t2919}`, parsed package ok, **23 ms** |
-| `CLK_TCK` | `/proc/self/auxv` `AT_CLKTCK` (17) | 100 | `getconf CLK_TCK` = **100**; **`sysconf(2)` returned 2048** — bionic numbering differs from glibc, so sysconf must not be used |
+| `CLK_TCK` | `/proc/self/auxv` `AT_CLKTCK` (17) | 100 | `getconf CLK_TCK` = **100** and auxv = **100**, while **`sysconf(2)` returned 2048** — bionic numbering differs from glibc, so sysconf must not be used. The probe now prints all three |
 | page size | not needed (`VmRSS` is kB) | — | `sysconf(30)` returned **1** — another reason to avoid sysconf |
 | cpuset groups | `/dev/cpuset/<dir>/tasks` | `cpuset` not advertised | cgroup **v1**, **13** group dirs with `tasks`, all owner-writable: `top-app 0-7`, `foreground 0-5`, `background 0-1,4-5`, `restricted 0-7`, … |
-| freezer | `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze` → `am freeze` | action hidden | no `/sys/fs/cgroup/uid_*/pid_*`; v2 path is `/apps/uid_…/pid_…`, so re-probe under `apps/`; `am help` lists `freeze` |
+| freezer | `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze` → `am freeze` | action hidden | **confirmed**: the `apps/uid_…/pid_…/cgroup.freeze` leaf exists and was written `1`→`0` on 2026-11-26; `/dev/freezer` also exists (v1); `am help` lists `freeze` |
 | force-stop | `am force-stop --user <user> <package>` | `unsupported` | `/system/bin/am` present |
 | renice | `setpriority(2)` primary; `renice` fallback | `renice` not advertised | toybox 0.8.13: `usage: renice [-gpu] -n INCREMENT ID...` — **`-n` is an increment**, so the target nice cannot be passed directly |
 | `hidepid` visibility | `/proc` mount options / unreadable peers | `skipped` counts; partial list | no restriction as root: 1198/1198 readable |
@@ -106,6 +105,23 @@ Required probe output (checked off as it lands):
 - **Identity** — `(pid, starttime)`; a second pass that sees a different `starttime` marks
   `cpu_pct:null` instead of attributing another process's ticks.
 
+## Package and process names
+
+- **Platform UIDs (`< 10 000`) never get a package from the UID map.** `uid 1000` is shared by
+  `system_server`, `surfaceflinger`, `netd`, …; the first package in `packages.list` is not "the"
+  package. The process's own `cmdline` is used when it *is* a package (e.g. `com.sec.android.sdhms`
+  running under `uid 1000`), otherwise `package` is `null`.
+- **App UIDs prefer the process cmdline** (`com.android.systemui`) over the UID map when the cmdline
+  is a package. Shared app UIDs and remote processes (`pkg:service`) fall back to the UID map, so a
+  remote process reports its base package. An isolated sandbox process (`uid 90xxx`,
+  `…:sandboxed_process…`) reports `null`.
+- **Names** strip the directory part of an absolute cmdline (`/system/bin/netd` → `netd`,
+  `/vendor/bin/hw/…composer-service` → `…composer-service`); `cmdline` keeps the full path. Kernel
+  threads use `status`'s `Name:`; a process with neither falls back to `pid N`.
+- This rule was added after the first S25 run mislabelled `system_server` as
+  `com.samsung.android.provider.filterprovider` and `system.ui` as
+  `com.samsung.android.app.aodservice`.
+
 ## Units
 
 | quantity | unit |
@@ -125,33 +141,37 @@ itself. A package action that expands to any protected PID is rejected as a whol
 
 ## Device checklist (Step 6)
 
-The host tests cannot exercise SELinux, AMS reactions or the real freezer leaf. These are the items
-that need a device run; each one names the command and what to send back.
+Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
 
-1. **Write paths (the only unverified half of the module).**
-   - `sysflow process oom <test-app> 500` then `cat /proc/<pid>/oom_score_adj` → expect `500`.
-   - `sysflow process renice <test-app> -5` then `awk '{print $19}' /proc/<pid>/stat` → expect `-5`.
-   - `sysflow process cpuset <test-app> top-app`, then `grep cpuset /proc/<pid>/cgroup` and re-run
-     `sysflow process list --query <test-app>` → the `cpuset` field should flip immediately; check
-     whether AMS moves it back after a few seconds.
-   - `sysflow process freeze <test-app>` then `cat /sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze`
-     → expect `1`; `unfreeze` → `0`. If the leaf is missing, confirm the `am freeze` fallback works.
-   - `sysflow process stop <disposable-app>` → the app should be gone from `process list`.
-   - Try `sysflow process oom com.android.systemui 0` → expect `invalid_arg` with `protected:true`.
-2. **Freezer leaf location.** The S25 probe looked only under `/sys/fs/cgroup/uid_*` and reported
-   "no freezer"; the unified cgroup path shows `/apps/uid_…/pid_…`. Re-run the (updated) probe and
-   send `freezer` — it now scans both `/sys/fs/cgroup/apps` and `/sys/fs/cgroup`.
-3. **`renice` mechanism.** Report whether `setpriority(2)` succeeds as root or the toybox fallback
-   was used (`mechanism` in the response) — SELinux may deny the syscall on some ROMs.
-4. **Timing with the real load**: `time sysflow process list --limit 50 --sample-ms 300` ×3 and
-   `time sysflow process get <pid>`; send the medians.
-5. **Sorting cross-check**: `sysflow process list --sort rss --limit 10` vs `dumpsys meminfo`, and
-   `--sort cpu` vs `top -b -n 1`.
-6. **Multi-user**: if a work profile exists, check that a UID like `10xxxxx` shows `user:10` and a
-   package label with the user suffix.
-7. **APK page** (owner build): 2 s polling stops when the page is backgrounded, the foreground card
-   matches the resumed activity, protected rows disable every action, and the experimental switch
-   reveals OOM / cpuset / freeze only when `caps.features` contains them.
+- `process oom io.sysflow 500` → `/proc/<pid>/oom_score_adj` = `500`, `verified:true`. A later
+  `list` showed the ROM had reset it to `920` — exactly the one-shot / "AMS may reset" contract.
+- `process renice io.sysflow -5` → `applied:-5`, `verified:true`, `mechanism:"setpriority"`; no
+  SELinux denial (the toybox fallback was not needed). Note: verifying with
+  `awk '{print $19}'` inside a double-quoted `su -c` string is misleading — the outer shell expands
+  `$19` to `$1` + `9`; use `sed -n 's/.*) //p'` or read the response's `applied` instead.
+- `process cpuset io.sysflow top-app` → `verified:true`, and `/proc/<pid>/cgroup` showed
+  `4:cpuset:/top-app`. (The process was already in `top-app`, so this proved the write path, not a
+  group transition.)
+- `process freeze` / `unfreeze` → the `apps/uid_…/pid_…/cgroup.freeze` leaf flipped `1`→`0` and read
+  back correctly (`mechanism:"cgroup-v2"`). The app was already frozen by the system before the
+  call (`before:"1"`), which is normal for a cached app.
+- `process stop io.sysflow` → `pids_before:[…]`, `pids_after:[]`, `verified:true`.
+- `process oom com.android.systemui 0` → rejected with `protected:true,
+  reason:"system critical package"`.
+- `/dev/cpuset` has 13 writable groups; the cgroup v2 freezer leaf lives under `apps/` and
+  `/dev/freezer` exists too.
+- `list --limit 50 --sample-ms 300` took **0.41–0.46 s** wall; `get` **0.25 s**; ~1100 processes
+  scanned in 23–28 ms.
+
+**Still open:**
+
+1. A cpuset move that actually changes groups (e.g. `background` → `top-app`), then whether AMS
+   moves it back.
+2. Same-instant cross-check: `list --sort rss` vs `dumpsys meminfo` and `--sort cpu` vs `top`.
+3. Multi-user labels (work profile / secure folder): `user` and the package suffix.
+4. APK build and visual/interaction acceptance: 2 s polling stops when backgrounded, protected rows
+   disable actions, experimental section only when `caps.features` allows.
+5. `am freeze` fallback (not exercised because the cgroup v2 leaf exists).
 
 ## Measured costs
 
@@ -159,11 +179,10 @@ Filled per step; do not guess.
 
 | path | target | measured |
 |---|---|---|
-| scan 1198 processes (pass 1) | < 60 ms | **28 ms** (device probe 2026-11-25) |
-| pass 2 (stat only, 1198) | < 25 ms | 待测 (host tests use a small fixture) |
-| `list` cold / no-foreground | < 600 ms / < 250 ms | 待测 |
-| `get` (one process) | < 50 ms + 200 ms sample | 待测 |
-| foreground dumpsys (cold / cached) | < 400 ms / 0 | **23 ms** cold (device probe) |
+| scan ~1100 processes (pass 1) | < 60 ms | **23–28 ms** (device probe + timed `list`) |
+| `list --limit 50 --sample-ms 300` (wall) | < 600 ms | **0.41–0.46 s** real, 0.04 s user (three runs, 2026-11-26) |
+| `get` (one process, 200 ms sample) | < 300 ms | **0.25 s** real (2026-11-26) |
+| foreground dumpsys (cold / cached) | < 400 ms / 0 | **23–30 ms** cold; `cached:true` on the next poll |
 
 ## Degradation reasons
 

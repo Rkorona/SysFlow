@@ -121,13 +121,7 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
         &fs.read_lossy(&format!("/proc/{pid}/cmdline"))
             .unwrap_or_default(),
     );
-    let name = if !cmdline.is_empty() {
-        cmdline.clone()
-    } else if !status.comm.is_empty() {
-        status.comm.clone()
-    } else {
-        format!("pid {pid}")
-    };
+    let name = display_name(&cmdline, &status.comm, pid);
     let oom_score_adj = fs
         .read_lossy(&format!("/proc/{pid}/oom_score_adj"))
         .ok()
@@ -148,6 +142,59 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
         oom_score_adj,
         cgroup,
     })
+}
+
+/// The name a UI should show: the package for app processes, the basename for daemon paths.
+///
+/// `/proc/<pid>/cmdline` is the package name for zygote children, an absolute path for native
+/// daemons and empty for kernel threads. Showing `/vendor/bin/hw/...composer-service` in a row is
+/// noise, so only the last path component is used there; the full cmdline stays in its own field.
+fn display_name(cmdline: &str, comm: &str, pid: u32) -> String {
+    if cmdline.is_empty() {
+        return if comm.is_empty() {
+            format!("pid {pid}")
+        } else {
+            comm.to_string()
+        };
+    }
+    if cmdline.starts_with('/') {
+        if let Some(name) = std::path::Path::new(cmdline).file_name() {
+            return name.to_string_lossy().into_owned();
+        }
+    }
+    cmdline.to_string()
+}
+
+/// Whether a cmdline token can be the process's own package name.
+///
+/// App processes carry the package in `cmdline[0]`; remote processes append `:service`, sandboxed
+/// processes append `:sandboxed_process…`, and native daemons carry an absolute path. Only the
+/// plain dotted form is treated as a package.
+fn looks_like_package(text: &str) -> bool {
+    !text.is_empty()
+        && text.len() <= 255
+        && text.contains('.')
+        && !text.contains([':', '/', '@', ' '])
+        && text
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_'))
+}
+
+/// The package this process belongs to, or `None` when that question has no honest answer.
+///
+/// The UID→package map alone is **not** enough: platform UIDs are shared by many services
+/// (`uid 1000` owns `system_server`, `surfaceflinger`, …), and a shared app UID can own several
+/// packages. The process's own cmdline is authoritative when it is a package; otherwise the UID map
+/// is only consulted for app UIDs (>= 10 000). A real S25 run showed `system_server` labelled
+/// `com.samsung.android.provider.filterprovider` before this rule.
+pub fn package_of(info: &ProcessInfo, packages: &packages::Packages) -> Option<String> {
+    if looks_like_package(&info.cmdline) {
+        return Some(info.cmdline.clone());
+    }
+    if info.uid < 10_000 {
+        return None;
+    }
+    packages.primary(info.uid).map(str::to_string)
 }
 
 /// Existing `/dev/cpuset` groups (directories with a `tasks` node), for the UI's group picker.
@@ -243,7 +290,7 @@ fn build_rows(
     infos
         .into_iter()
         .map(|info| {
-            let package = packages.primary(info.uid).map(str::to_string);
+            let package = package_of(&info, packages);
             let system = info.uid < 10_000;
             let protected = model::protected_reason(
                 info.uid,
@@ -441,7 +488,7 @@ fn detail_with_sample(fs: &Sysfs, data_dir: &Path, pid: u32, sample_ms: u64) -> 
             .with_detail(json!({"gone": true, "pid": pid}))
     })?;
     let installed = packages::read(fs, data_dir);
-    let package = installed.primary(info.uid).map(str::to_string);
+    let package = package_of(&info, &installed);
     let package_names: Vec<String> = installed
         .names(info.uid)
         .map(<[String]>::to_vec)
@@ -641,6 +688,97 @@ mod tests {
         assert_eq!(rows[1]["cpu_pct"], Value::Null);
         assert_eq!(out["foreground"]["disabled"], true);
         assert_eq!(out["cpuset_groups"], json!(["background", "top-app"]));
+    }
+
+    #[test]
+    fn package_and_name_rules_match_real_device_shapes() {
+        let root = temp("package-rules");
+        // Platform UID shared by system_server, surfaceflinger, …: no package can be named.
+        write(
+            &root,
+            "proc/3913/stat",
+            &stat_line(3913, "system_server", (1, 3)),
+        );
+        write(
+            &root,
+            "proc/3913/status",
+            "Name:\tsystem_server\nUid:\t1000\t1000\t1000\t1000\nVmRSS:\t500000 kB\n",
+        );
+        write(&root, "proc/3913/cmdline", "system_server\u{0}");
+        // Shared app UID: the process cmdline (systemui) wins over the first package in the map.
+        write(
+            &root,
+            "proc/5354/stat",
+            &stat_line(5354, "com.android.systemui", (1, 3)),
+        );
+        write(
+            &root,
+            "proc/5354/status",
+            "Name:\tcom.android.systemui\nUid:\t10056\t10056\t10056\t10056\nVmRSS:\t400000 kB\n",
+        );
+        write(&root, "proc/5354/cmdline", "com.android.systemui\u{0}");
+        // Remote process: the suffix is not a package, the UID map names the base package.
+        write(
+            &root,
+            "proc/16023/stat",
+            &stat_line(16023, "com.tencent.mm:push", (1, 3)),
+        );
+        write(
+            &root,
+            "proc/16023/status",
+            "Name:\tcom.tencent.mm:push\nUid:\t10367\t10367\t10367\t10367\nVmRSS:\t200000 kB\n",
+        );
+        write(&root, "proc/16023/cmdline", "com.tencent.mm:push\u{0}");
+        // Native daemon: the UI shows the basename, the full path stays in `cmdline`.
+        write(&root, "proc/2341/stat", &stat_line(2341, "netd", (1, 3)));
+        write(
+            &root,
+            "proc/2341/status",
+            "Name:\tnetd\nUid:\t0\t0\t0\t0\nVmRSS:\t10000 kB\n",
+        );
+        write(&root, "proc/2341/cmdline", "/system/bin/netd\u{0}");
+        // Isolated sandbox UID: no package at all.
+        write(&root, "proc/7787/stat", &stat_line(7787, "sandbox", (1, 3)));
+        write(
+            &root,
+            "proc/7787/status",
+            "Name:\tsandbox\nUid:\t90002\t90002\t90002\t90002\nVmRSS:\t1000 kB\n",
+        );
+        write(
+            &root,
+            "proc/7787/cmdline",
+            "net.quetta.browser:sandboxed_process0:org.chromium.app\u{0}",
+        );
+        write(
+            &root,
+            "data/system/packages.list",
+            "com.samsung.filter 1000 0 /data 0 0 1 0 0 0\ncom.samsung.aod 10056 0 /data 0 0 1 0 0 0\ncom.tencent.mm 10367 0 /data 0 0 1 0 0 0\n",
+        );
+
+        let fs = Sysfs::new(&root);
+        let out = list(
+            &fs,
+            &root.join("state-dir"),
+            &ListOptions {
+                limit: 200,
+                sort: SortKey::Pid,
+                sample_ms: 0,
+                with_foreground: false,
+                ..ListOptions::default()
+            },
+        );
+        let rows = out["processes"].as_array().unwrap();
+        let row = |pid: i64| rows.iter().find(|row| row["pid"] == pid).unwrap();
+
+        assert_eq!(row(3913)["package"], Value::Null);
+        assert_eq!(row(3913)["name"], "system_server");
+        assert_eq!(row(5354)["package"], "com.android.systemui");
+        assert_eq!(row(16023)["package"], "com.tencent.mm");
+        assert_eq!(row(16023)["name"], "com.tencent.mm:push");
+        assert_eq!(row(2341)["name"], "netd");
+        assert_eq!(row(2341)["cmdline"], "/system/bin/netd");
+        assert_eq!(row(2341)["package"], Value::Null);
+        assert_eq!(row(7787)["package"], Value::Null);
     }
 
     #[test]

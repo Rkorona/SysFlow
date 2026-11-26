@@ -31,7 +31,7 @@ fn collect(fs: &Sysfs) -> Value {
     let started = Instant::now();
     let mut out = Map::new();
     out.insert("proc".into(), proc_section(fs));
-    out.insert("libc".into(), libc_section());
+    out.insert("libc".into(), libc_section(fs));
     out.insert("samples".into(), samples_section(fs));
     out.insert("foreground".into(), foreground_section());
     out.insert("packages_list".into(), packages_section(fs));
@@ -80,10 +80,14 @@ fn proc_section(fs: &Sysfs) -> Value {
     })
 }
 
-fn libc_section() -> Value {
+fn libc_section(fs: &Sysfs) -> Value {
+    let auxv = sysflow_modules::process::model::clock_ticks(fs);
     json!({
         "clock_ticks": sysconf_value(SC_CLK_TCK, 100),
         "page_size": sysconf_value(SC_PAGESIZE, 4096),
+        // bionic's sysconf numbering is not glibc's (see the module doc); this is what the module
+        // actually uses and what `getconf CLK_TCK` agrees with.
+        "auxv_clock_ticks": auxv,
     })
 }
 
@@ -262,9 +266,14 @@ fn cpuset_section(fs: &Sysfs) -> Value {
             "owner_write": fs.mode(&tasks).map(|mode| mode & 0o200 != 0).unwrap_or(false),
         }));
     }
+    let group_names: Vec<&str> = with_tasks
+        .iter()
+        .filter_map(|group| group.get("group").and_then(Value::as_str))
+        .collect();
     json!({
         "root": "/dev/cpuset",
-        "groups": groups,
+        "entries": groups,
+        "groups": group_names,
         "with_tasks": with_tasks,
     })
 }

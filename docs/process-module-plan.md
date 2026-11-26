@@ -1,6 +1,6 @@
 # 进程模块（M4）开发计划
 
-> 状态：**Step 0–5 主机完成（2026-11-25）**：契约、S25 探针、只读面、动作、实验动作与 APK 页面代码均已落地；APK 由用户构建，真机写路径与验收待跑。
+> 状态：**Step 0–5 完成，动作写路径已于 2026-11-26 在 S25 验证**（v0.2.3）；APK 由用户构建，剩余验收项见 `docs/modules/process.md`〈Device checklist〉。
 > 修订 2 记录了真机推翻的三个假设（sysconf、renice 增量、freezer 路径）；未验证的行为仍不写进协议正文（§3.25 Draft）。
 >
 > 关联：`docs/development-plan.md` §7.5（功能设计）与 §12 阶段 4（里程碑）、
@@ -34,6 +34,18 @@
 | 14 | 实测 | cgroup **v1** cpuset 有 13 个组、`tasks` 可写；`/dev/cpuset` 顶层混有普通文件，组发现必须过滤目录 |
 | 15 | 实测 | 前台行是 `topResumedActivity=ActivityRecord{… u0 <pkg>/<activity> …}`，解析器已验证；`packages.list` 698 行 / 10 列 |
 | 16 | 实测 | `comm` 截断到 15 字符（`.wallpaper.live`）→ 名称优先取 `cmdline`；SELinux `Enforcing`，写路径未验证 |
+
+**修订 3**（真机动作验证 + 数据审查，S25 2026-11-26，v0.2.3）：
+
+| # | 类型 | 变化 |
+|---|---|---|
+| 17 | 实测 | `oom` / `renice` / `cpuset` / `freeze` / `unfreeze` / `stop` 全部在真机成功并读回；`setpriority` 未被 SELinux 拒绝 |
+| 18 | 实测 | 保护名单生效：`oom com.android.systemui 0` 被拒（`system critical package`） |
+| 19 | 实测 | freezer 叶子确认在 `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze`；`/dev/freezer` 也存在 |
+| 20 | 纠错 | `package` 不能只按 UID 取包名：`system_server`（uid 1000）被误标为 filterprovider、systemui 被误标为 aodservice。改为"cmdline 是包名则用它；平台 UID 为 null；其余再查映射" |
+| 21 | 改进 | 绝对路径 cmdline 的 `name` 取 basename（`/system/bin/netd` → `netd`），`cmdline` 保留全路径 |
+| 22 | 实测 | `list --limit 50 --sample-ms 300` 墙钟 0.41–0.46 s，`get` 0.25 s，扫描 ~1100 进程 23–28 ms |
+| 23 | 实测 | `oom` 与 `cpuset` 会被 ROM/AMS 重置（oom 500 → 之后列表 920），与"一次性、不持久化"的设计一致 |
 
 ## 目标
 

@@ -1087,6 +1087,11 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 - `protected_reason` is present only when `protected` is true (`pid ≤ 2 is the kernel`,
   `kernel thread`, `uid < 10000 (platform)`, `system critical package`, `sysflow itself`). Clients
   show it next to a disabled action instead of guessing why.
+- `package` is the process's **own** package when its `cmdline` is one. Platform UIDs
+  (`uid < 10000`) and isolated sandbox UIDs report `null` rather than an arbitrary first package
+  from the UID map; a remote process (`pkg:service`) reports its base package from the map.
+- `name` strips the directory of an absolute `cmdline` (`/system/bin/netd` → `netd`); the full path
+  remains in `cmdline`.
 - `limit` defaults to 50 and is clamped to 1..200. Sorting is applied **before** truncation; `truncated`
   says more rows exist. `--filter system` = `uid < 10000`; `query` is a case-insensitive substring of
   package or name. `skipped` counts processes that could not be read (exit mid-scan, SELinux).

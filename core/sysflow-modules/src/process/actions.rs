@@ -90,9 +90,8 @@ struct Resolved {
 }
 
 fn package_of(info: &scan::ProcessInfo, map: &packages::Packages) -> Option<String> {
-    map.primary(info.uid)
-        .map(str::to_string)
-        .or_else(|| (!info.cmdline.is_empty()).then(|| info.cmdline.clone()))
+    // One rule for the whole module: never label a shared/system UID with an arbitrary package.
+    scan::package_of(info, map)
 }
 
 fn resolve(

@@ -4,7 +4,7 @@ Unified system manager for rooted Android: a root **module** (Rust binary `sysfl
 enforcement/adaptive daemon and KernelSU WebUI) plus an **M3 Expressive APK** that is pure UI
 and never runs in the background.
 
-Current module version: `v0.2.2` (`module/module.prop`).
+Current module version: `v0.2.3` (`module/module.prop`).
 
 - Plan and decisions: [docs/development-plan.md](docs/development-plan.md)
 - Protocol: [docs/protocol.md](docs/protocol.md)
@@ -239,7 +239,7 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 
 ```sh
 ./build-sysflow-module.sh
-# dist/sysflow-module-v0.2.2.zip (+ .sha256)
+# dist/sysflow-module-v0.2.3.zip (+ .sha256)
 ```
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the
