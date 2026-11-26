@@ -282,20 +282,20 @@ private fun TuningDialog(
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("轮询间隔", style = MaterialTheme.typography.titleSmallEmphasized)
+                    Text("轮询间隔（秒）", style = MaterialTheme.typography.titleSmallEmphasized)
                     ConnectedChoiceRow(
                         options = ProcessTuning.POLL_CHOICES,
                         selected = pollMs,
-                        label = { pollLabel(it) },
+                        label = { "$it" },
                         onSelect = onPoll,
                     )
                 }
                 Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Text("采样窗口", style = MaterialTheme.typography.titleSmallEmphasized)
+                    Text("采样窗口（ms）", style = MaterialTheme.typography.titleSmallEmphasized)
                     ConnectedChoiceRow(
                         options = ProcessTuning.SAMPLE_CHOICES,
                         selected = sampleMs,
-                        label = { "$it ms" },
+                        label = { "$it" },
                         onSelect = onSample,
                     )
                 }
@@ -312,8 +312,6 @@ private fun TuningDialog(
         },
     )
 }
-
-private fun pollLabel(ms: Int): String = "${ms / 1000} 秒"
 
 // ---------------------------------------------------------------------------------------------
 // Confirmation

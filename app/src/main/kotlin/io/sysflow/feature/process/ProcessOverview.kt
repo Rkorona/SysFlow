@@ -111,6 +111,8 @@ internal fun ProcessListContent(
                 list = list,
                 foregroundLabel = foregroundPackage?.let { identities[it]?.label ?: it },
                 foregroundIcon = foregroundPackage?.let { identities[it]?.icon },
+                pollMs = state.pollMs,
+                sampleMs = state.sampleMs,
                 modifier = Modifier.padding(bottom = 8.dp),
             )
         }
@@ -267,6 +269,9 @@ private fun ProcessHero(
     list: ProcessList,
     foregroundLabel: String?,
     foregroundIcon: ImageBitmap?,
+    /** Configured cadence (ProcessTuning); shown as-is so the card matches the tune dialog. */
+    pollMs: Int,
+    sampleMs: Int,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -318,7 +323,11 @@ private fun ProcessHero(
                         overflow = TextOverflow.Ellipsis,
                     )
                     Text(
-                        "每 2 秒刷新 · 采样 ${list.sampleMs} ms",
+                        if (pollMs % 1000 == 0) {
+                            "每 ${pollMs / 1000} 秒刷新 · 采样 $sampleMs ms"
+                        } else {
+                            "每 $pollMs ms 刷新 · 采样 $sampleMs ms"
+                        },
                         style = MaterialTheme.typography.bodySmall,
                         color = scheme.onPrimaryContainer.copy(alpha = 0.75f),
                     )
