@@ -1282,6 +1282,10 @@ sysflow storage usage [--path /data] [--limit 20] [--budget-ms 3000]
 
 - Walks the top-level entries of `path`, each with its recursive size, and sorts by allocated bytes
   (`st_blocks × 512`, not apparent size).
+- `path` is usually `/data` (the whole data partition, so top-level entries are `app`, `data`,
+  `media`, `system`, …) or `/storage/emulated/0` (the user-visible internal storage: `DCIM`,
+  `Download`, `Android`, …). These are two views of the **same** blocks — `/storage/emulated/0` is
+  `/data/media/0` — so their totals must never be added together.
 - **Time-bounded**: stops at the budget and reports `partial:true`; `visited` says how far it got.
 - **Symlinks are never followed and other filesystems are not crossed**, so `/data/media` (and bind
   mounts) cannot be counted twice. Unreadable entries increment `denied` instead of failing.

@@ -75,7 +75,9 @@
 
 ### `storage usage [--path /data] [--limit 20] [--budget-ms 3000]`
 
-顶层条目递归求和、按分配字节排序。**有界**：超时返回 `partial:true` 与 `visited`；跳符号链接、
+顶层条目递归求和、按分配字节排序。`--path` 支持 `/data`（整块分区）与 `/storage/emulated/0`
+（用户可见的内部存储）；后者是前者的 `/data/media/0`，**两个视图不可相加**。APK 默认分析用户可见视图，
+并保留整块分区作为诊断视图。**有界**：超时返回 `partial:true` 与 `visited`；跳符号链接、
 不跨文件系统；无权限条目计入 `denied`。`limit` 钳 1–100。
 
 ### `storage trim [--path /data]`

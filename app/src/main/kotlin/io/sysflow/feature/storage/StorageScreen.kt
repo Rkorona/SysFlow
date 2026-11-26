@@ -149,6 +149,7 @@ fun StorageScreen(viewModel: StorageViewModel = koinViewModel()) {
                             state = state,
                             onTrim = { confirm = trimConfirm { viewModel.trim() } },
                             onAnalyze = viewModel::analyzeUsage,
+                            onUsagePath = viewModel::setUsagePath,
                         )
                     }
                 }

@@ -56,6 +56,10 @@ Required output (checked off as it lands):
   used, not `sda1`.
 - **Directory sizes are allocated blocks** (`st_blocks × 512`), not apparent size; symlinks are not
   followed and other filesystems are not crossed.
+- **Two analysis targets.** `/storage/emulated/0` is the user-visible internal storage (DCIM,
+  Download, Android…), while `/data` is the whole partition (app, data, media, system…).
+  `/storage/emulated/0` is the same blocks as `/data/media/0`, so the two totals must never be
+  summed. The APK defaults to the user-visible view and offers `/data` as the diagnostic view.
 - **JEDEC health**: `0x01..0x0a` = 10 %…100 % of rated endurance used, `0x0b` = exceeded. Any other
   format hides `storage.device.health_pct` instead of guessing.
 
@@ -125,8 +129,9 @@ Filled per step; do not guess.
 3. **I/O** vs a manual `cat /proc/diskstats` pair over the same interval.
 4. **Scheduler / read_ahead**: change both, read back, reboot, confirm replay; then `reset`.
 5. **TRIM**: run it, confirm `trimmed_bytes > 0` and the device stays responsive.
-6. **Directory analysis**: run with the default budget on `/data`; report elapsed, `partial`, and
-   whether the top entries look right (compare with `du -x -d1 /data` if available).
+6. **Directory analysis**: run with the default budget on both `/storage/emulated/0` and `/data`;
+   report elapsed, `partial`, denied counts, and whether the top entries look right (compare with
+   `du -x -d1 /storage/emulated/0` and `du -x -d1 /data`). They must not be added together.
 7. **Low-space event**: hard to force on a healthy device; check the event path by temporarily
    lowering the threshold in a debug build if needed.
 8. **APK**: page loads, 2 s polling stops when backgrounded, TRIM confirmation works, partial

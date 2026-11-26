@@ -32,6 +32,8 @@ class StorageViewModel(private val client: SysFlowClient) : ViewModel() {
         val options: StorageOptions = StorageOptions(emptyList(), emptyList()),
         val usage: StorageUsage? = null,
         val usageLoading: Boolean = false,
+        /** What the directory analysis scans: user-visible storage or the whole /data partition. */
+        val usagePath: String = USER_STORAGE,
         val saving: Boolean = false,
         val actionRunning: String? = null,
         val message: String? = null,
@@ -173,10 +175,16 @@ class StorageViewModel(private val client: SysFlowClient) : ViewModel() {
         }
     }
 
+    /** Switch the analysis target; the previous result no longer describes the selected view. */
+    fun setUsagePath(path: String) {
+        _state.update { it.copy(usagePath = path, usage = null) }
+    }
+
     fun analyzeUsage() {
         viewModelScope.launch {
+            val path = _state.value.usagePath
             _state.update { it.copy(usageLoading = true, usage = null, error = null) }
-            runCatching { client.storageUsage(path = "/data", limit = 20, budgetMs = 3000) }
+            runCatching { client.storageUsage(path = path, limit = 20, budgetMs = 3000) }
                 .onSuccess { json ->
                     _state.update {
                         it.copy(usage = parseStorageUsage(json), usageLoading = false)
@@ -195,5 +203,13 @@ class StorageViewModel(private val client: SysFlowClient) : ViewModel() {
 
     fun dismissMessage() {
         _state.update { it.copy(message = null, error = null) }
+    }
+
+    companion object {
+        /** User-visible internal storage: photos, downloads, app folders. */
+        const val USER_STORAGE = "/storage/emulated/0"
+
+        /** The whole data partition, including `/data/media` and every app's private data. */
+        const val SYSTEM_DATA = "/data"
     }
 }

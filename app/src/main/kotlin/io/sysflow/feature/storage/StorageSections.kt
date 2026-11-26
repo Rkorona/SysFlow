@@ -423,6 +423,7 @@ internal fun MaintenanceSection(
     state: StorageViewModel.UiState,
     onTrim: () -> Unit,
     onAnalyze: () -> Unit,
+    onUsagePath: (String) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
@@ -471,9 +472,20 @@ internal fun MaintenanceSection(
                 ActionGroupHeader(
                     icon = Icons.Rounded.FolderOpen,
                     title = "目录占用",
-                    supporting = "扫描 /data，最多约 3 秒",
+                    supporting = "内部存储看照片/下载，应用数据看整块 /data；最多约 3 秒",
                     container = scheme.tertiaryContainer,
                     content = scheme.onTertiaryContainer,
+                )
+                ConnectedChoiceRow(
+                    options = listOf(StorageViewModel.USER_STORAGE, StorageViewModel.SYSTEM_DATA),
+                    selected = state.usagePath,
+                    label = { usageLabel(it) },
+                    onSelect = onUsagePath,
+                    enabled = !state.usageLoading,
+                )
+                NoteTile(
+                    text = "内部存储 = /storage/emulated/0（DCIM、Download、Android 等用户文件）；" +
+                        "应用数据 = /data 整块分区，包含前者，两个视图不可相加。",
                 )
                 if (state.usageLoading) BusyTile("扫描中（最多约 3 秒）")
                 FilledTonalButton(
@@ -488,13 +500,27 @@ internal fun MaintenanceSection(
                         modifier = Modifier.size(ButtonDefaults.IconSize),
                     )
                     Spacer(Modifier.size(ButtonDefaults.IconSpacing))
-                    Text("分析目录占用", maxLines = 1)
+                    Text(
+                        if (state.usagePath == StorageViewModel.SYSTEM_DATA) {
+                            "分析应用数据"
+                        } else {
+                            "分析内部存储"
+                        },
+                        maxLines = 1,
+                    )
                 }
             }
         }
 
         state.usage?.let { UsageResult(it) }
     }
+}
+
+/** Friendly name for the two supported analysis roots; other paths are shown verbatim. */
+internal fun usageLabel(path: String): String = when (path) {
+    StorageViewModel.USER_STORAGE -> "内部存储"
+    StorageViewModel.SYSTEM_DATA -> "应用数据"
+    else -> path
 }
 
 /** Heaviest directories as one connected list; the bar is relative to the heaviest entry. */
@@ -504,7 +530,7 @@ private fun UsageResult(usage: StorageUsage) {
     val accent = MaterialTheme.sysFlowColors.containerAccent
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         SectionHeader(
-            title = "/data 共 ${formatStorageKb(usage.totalKb)}",
+            title = "${usageLabel(usage.path)} 共 ${formatStorageKb(usage.totalKb)}",
             supporting = "耗时 ${usage.elapsedMs} ms · 访问 ${usage.visited} 项" +
                 if (usage.denied > 0) " · ${usage.denied} 项无权限" else "",
             action = {

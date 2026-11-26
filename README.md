@@ -171,7 +171,8 @@ boot-cumulative counters are cheap); throughput needs an interval and is a verb 
 ```sh
 sysflow storage get --pretty                    # capacity, device, scheduler, read_ahead, IO totals
 sysflow storage io --interval-ms 1000           # live read/write KB/s, IOPS, utilisation
-sysflow storage usage --path /data --budget-ms 3000   # top-level directories by allocated bytes
+sysflow storage usage --path /storage/emulated/0 --budget-ms 3000  # user-visible internal storage
+sysflow storage usage --path /data --budget-ms 3000               # whole partition (includes the above)
 sysflow storage trim                            # fstrim -v /data (one-shot, not persisted)
 sysflow storage set '{"storage.scheduler":"kyber"}' --persist
 sysflow storage set '{"storage.read_ahead_kb":1024}' --persist
