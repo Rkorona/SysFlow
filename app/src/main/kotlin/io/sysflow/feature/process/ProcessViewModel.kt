@@ -3,6 +3,8 @@ package io.sysflow.feature.process
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.sysflow.core.root.SysFlowClient
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
@@ -42,6 +44,7 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
     }
 
     private val _state = MutableStateFlow(UiState())
+    private var detailJob: Job? = null
     val state = _state.asStateFlow()
 
     init {
@@ -115,9 +118,17 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
         _state.update { it.copy(experimental = !it.experimental) }
     }
 
-    fun loadDetail(pid: Int) {
-        _state.update { it.copy(detailLoading = true, detail = null) }
-        viewModelScope.launch {
+    /**
+     * Load one process into the detail sheet.
+     *
+     * [reload] refreshes the open sheet in place after an action, instead of blanking it to a
+     * spinner. If the process is gone by then (a successful stop), the sheet closes quietly and the
+     * action's own message stays — "读取进程失败" would wrongly read as if the stop had failed.
+     */
+    fun loadDetail(pid: Int, reload: Boolean = false) {
+        detailJob?.cancel()
+        if (!reload) _state.update { it.copy(detailLoading = true, detail = null) }
+        detailJob = viewModelScope.launch {
             runCatching { client.processGet(pid) }
                 .onSuccess { json ->
                     _state.update {
@@ -125,18 +136,25 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
                     }
                 }
                 .onFailure { error ->
+                    if (error is CancellationException) throw error
                     _state.update {
-                        it.copy(
-                            detailLoading = false,
-                            error = error.message ?: "读取进程 $pid 失败",
-                        )
+                        if (reload) {
+                            it.copy(detailLoading = false, detail = null)
+                        } else {
+                            it.copy(
+                                detailLoading = false,
+                                error = error.message ?: "读取进程 $pid 失败",
+                            )
+                        }
                     }
                 }
         }
     }
 
+    /** Closing the sheet also drops a load still in flight, so it cannot pop the sheet back open. */
     fun dismissDetail() {
-        _state.update { it.copy(detail = null) }
+        detailJob?.cancel()
+        _state.update { it.copy(detail = null, detailLoading = false) }
     }
 
     fun stop(target: String, user: Int? = null) = runAction("停止 $target") {
@@ -205,7 +223,7 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
                 }
             // The action changed live process state; refresh the list and the open detail if any.
             refresh(silent = true)
-            _state.value.detail?.let { loadDetail(it.pid) }
+            _state.value.detail?.let { loadDetail(it.pid, reload = true) }
         }
     }
 
