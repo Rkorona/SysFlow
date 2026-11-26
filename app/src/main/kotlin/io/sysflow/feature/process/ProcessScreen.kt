@@ -165,7 +165,8 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                     },
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
-                        .padding(horizontal = 16.dp, bottom = 16.dp + bottomInset),
+                        .padding(horizontal = 16.dp)
+                        .padding(bottom = 16.dp + bottomInset),
                     shape = MaterialTheme.shapes.extraLarge,
                     color = MaterialTheme.colorScheme.errorContainer,
                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
