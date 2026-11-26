@@ -150,6 +150,7 @@ sysflow process list --limit 50 --sort cpu --filter all --sample-ms 500
 sysflow process list --query com.example --no-foreground
 sysflow process get 8123                       # PSS, nice/policy, cgroup/cpuset, frozen
 sysflow process stop com.example.app           # one-shot force-stop
+sysflow process stop-all                       # force-stop every unprotected app (am per package)
 sysflow process oom com.example.app 100        # oom_score_adj, high risk, not persisted
 sysflow process renice com.example.app -5      # setpriority(2), toybox renice as fallback
 sysflow process sched com.example.app fifo 10  # experimental: fifo|rr need priority 1..=99
@@ -159,7 +160,9 @@ sysflow process freeze com.example.app         # experimental: cgroup v2/v1, am 
 
 Protection is evaluated against the **current** process state: `pid ≤ 2`, kernel threads,
 `uid < 10000`, a small package denylist and SysFlow itself are refused, and a package whose
-expansion contains any protected PID is rejected as a whole. Nothing here writes `config.json`, so an
+expansion contains any protected PID is rejected as a whole. `stop-all` inverts the same gate to pick
+its targets, so "全部停止" can never stop a protected process, and the foreground app is kept unless
+`--foreground` is passed. Nothing here writes `config.json`, so an
 action cannot affect boot, drift or safe mode. Every executed action also writes a structured
 `process_action` event to the module-owned journal (`docs/event-system.md`), which the APK shows in
 its event screens. The APK list page tunes its own cadence: the poll interval (1–10 s) and the

@@ -200,6 +200,15 @@ class SysFlowClient(private val root: RootExecutor) {
         return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
     }
 
+    /** Force-stop every unprotected app package (`process stop-all`); foreground kept by default. */
+    suspend fun processStopAll(includeForeground: Boolean = false): JsonObject {
+        val args = buildList {
+            add("process"); add("stop-all")
+            if (includeForeground) add("--foreground")
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
     /** Set `oom_score_adj` (`-1000..=1000`), high risk and never persisted. */
     suspend fun processOom(target: String, adjustment: Int): JsonObject =
         parseEnvelope<JsonObject>(

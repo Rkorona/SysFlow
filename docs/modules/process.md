@@ -158,7 +158,7 @@ itself. A package action that expands to any protected PID is rejected as a whol
 
 All executed process actions emit a structured `process_action` event (`category: "action"`) to the
 module-owned journal under `/data/adb/sysflow/events/`:
-- `stop`, `oom`, `renice`, `sched`, `cpuset`, `freeze`, `unfreeze`.
+- `stop`, `stop-all`, `oom`, `renice`, `sched`, `cpuset`, `freeze`, `unfreeze`.
 - Fully verified actions emit severity `info`; actions with unconfirmed or surviving PIDs emit `warning`.
 - `metadata` always contains `action`, `target` and `verified`, plus the action's own fields
   (`user` / `pids_before` / `pids_after`, `adjustment`, `nice`, `policy` / `priority`, `group`,
@@ -204,6 +204,9 @@ Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
    when backgrounded, protected rows disable actions, experimental section only when
    `caps.features` allows.
 5. `am freeze` fallback (not exercised because the cgroup v2 leaf exists).
+6. `process stop-all` on the device: confirm the protection gate keeps systemui / platform
+   processes out, the foreground package is skipped by default, and the shared verification
+   window reports survivors honestly.
 
 ## Measured costs
 

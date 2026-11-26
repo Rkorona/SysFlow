@@ -66,6 +66,9 @@ import io.sysflow.core.model.formatTemp
 import io.sysflow.core.ui.components.StatusPill
 import io.sysflow.core.ui.components.segmentedShape
 import io.sysflow.core.ui.theme.sysFlowColors
+import io.sysflow.feature.mem.parseMemSnapshot
+import io.sysflow.feature.storage.formatStorageKb
+import io.sysflow.feature.storage.parseStorageSnapshot
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -84,6 +87,8 @@ fun HomeScreen(
     onOpenEvents: (String?) -> Unit,
     onOpenActivity: () -> Unit,
     onOpenBattery: () -> Unit,
+    onOpenMem: () -> Unit,
+    onOpenStorage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val cpu = remember(snapshot.modules) { CpuSnapshot.from(snapshot.modules["cpu"]) }
@@ -112,6 +117,12 @@ fun HomeScreen(
             )
         }
     }
+    // MEMORY / STORAGE cards read the same snapshot the CPU card uses; the caps check mirrors
+    // cpuConnected so an unsupported module keeps its "waiting" placeholder instead of a dead card.
+    val mem = remember(snapshot.modules) { parseMemSnapshot(snapshot.modules["mem"]) }
+    val memConnected = caps.modules["mem"]?.supported == true && mem != null
+    val storage = remember(snapshot.modules) { parseStorageSnapshot(snapshot.modules["storage"]) }
+    val storageConnected = caps.modules["storage"]?.supported == true && storage != null
     val activeModules = remember(caps.modules) {
         caps.modules.filterValues { it.supported }.keys.map(::moduleDisplayName)
     }
@@ -184,23 +195,51 @@ fun HomeScreen(
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    // Headline = share of RAM in use, like the CPU card; the swap/zram split lives
+                    // on the memory page, the card only needs the one number people act on.
                     DeviceStatusCard(
                         modifier = Modifier.weight(1f),
                         title = "MEMORY",
                         icon = Icons.Rounded.Dns,
                         accent = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
-                        value = "—",
-                        detail = AnnotatedString("已用内存 / 总内存"),
-                        status = "等待模块接入",
+                        value = mem?.let { "${(it.usedKb * 100.0 / it.totalKb).roundToInt()}%" } ?: "—",
+                        valueSuffix = if (mem != null) "已用" else "",
+                        meter = mem?.let { it.usedKb.toFloat() / it.totalKb },
+                        detail = AnnotatedString(
+                            if (mem != null) {
+                                "${formatStorageKb(mem.usedKb)} / ${formatStorageKb(mem.totalKb)}"
+                            } else {
+                                "已用内存 / 总内存"
+                            },
+                        ),
+                        status = if (mem != null) "可用 ${formatStorageKb(mem.availableKb)}" else "等待模块接入",
+                        statusActive = memConnected,
+                        statusWarn = mem != null && mem.availableKb * 100 < mem.totalKb * 15,
+                        onClick = if (memConnected) onOpenMem else null,
                     )
                     DeviceStatusCard(
                         modifier = Modifier.weight(1f),
                         title = "STORAGE",
                         icon = Icons.Rounded.Storage,
                         accent = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.72f),
-                        value = "—",
-                        detail = AnnotatedString("已用空间 / 总容量"),
-                        status = "等待模块接入",
+                        value = storage?.let { "${it.capacity.usedPct}%" } ?: "—",
+                        valueSuffix = if (storage != null) "已用" else "",
+                        meter = storage?.let { it.capacity.usedFraction },
+                        detail = AnnotatedString(
+                            if (storage != null) {
+                                "${formatStorageKb(storage.capacity.usedKb)} / ${formatStorageKb(storage.capacity.totalKb)}"
+                            } else {
+                                "已用空间 / 总容量"
+                            },
+                        ),
+                        status = if (storage != null) {
+                            "可用 ${formatStorageKb(storage.capacity.availKb)}"
+                        } else {
+                            "等待模块接入"
+                        },
+                        statusActive = storageConnected,
+                        statusWarn = storage != null && storage.capacity.usedPct >= 90,
+                        onClick = if (storageConnected) onOpenStorage else null,
                     )
                 }
             }

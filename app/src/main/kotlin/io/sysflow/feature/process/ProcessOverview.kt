@@ -102,7 +102,11 @@ internal fun ProcessListContent(
             start = 16.dp,
             end = 16.dp,
             top = 8.dp,
-            bottom = (if (state.selectionMode) 104.dp else 24.dp) + bottomInset,
+            bottom = (when {
+                state.selectionMode -> 104.dp
+                "stop_all" in state.features -> 88.dp
+                else -> 24.dp
+            }) + bottomInset,
         ),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -130,7 +134,7 @@ internal fun ProcessListContent(
                     onRefresh = onRefresh,
                 )
                 ConnectedChoiceRow(
-                    options = listOf("all", "user", "system"),
+                    options = listOf("all", "user", "system", "protected"),
                     selected = state.filter,
                     label = { filterLabel(it) },
                     onSelect = onFilter,
@@ -679,12 +683,14 @@ private fun usageFraction(entry: ProcessEntry, sort: String, maxCpu: Double, max
 private fun filterLabel(value: String) = when (value) {
     "user" -> "用户"
     "system" -> "系统"
+    "protected" -> "受保护"
     else -> "全部"
 }
 
 private fun filterIcon(value: String) = when (value) {
     "user" -> Icons.Rounded.Person
     "system" -> Icons.Rounded.Memory
+    "protected" -> Icons.Rounded.Lock
     else -> Icons.Rounded.Apps
 }
 

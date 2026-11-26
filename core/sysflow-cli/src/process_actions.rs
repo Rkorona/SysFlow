@@ -1,4 +1,4 @@
-//! `sysflow process stop|oom|renice|sched|cpuset|freeze|unfreeze` — one-shot actions.
+//! `sysflow process stop|stop-all|oom|renice|sched|cpuset|freeze|unfreeze` — one-shot actions.
 //!
 //! The CLI only parses arguments; resolution, protection, identity re-checks and read-back all live
 //! in `sysflow_modules::process::actions`, where they are covered by host tests.
@@ -114,6 +114,12 @@ fn positionals<'a>(rest: &[&'a str]) -> Vec<&'a str> {
 fn flag<'a>(args: &[&'a str], name: &str) -> Option<&'a str> {
     let position = args.iter().position(|arg| *arg == name)?;
     args.get(position + 1).copied()
+}
+
+/// `process stop-all [--foreground]` — no target; the module selects the packages.
+pub fn stop_all(reg: &Registry, rest: &[&str]) -> Result<Value> {
+    let include_foreground = rest.contains(&"--foreground");
+    actions::stop_all(&reg.ctx().sysfs, &reg.ctx().data_dir, include_foreground)
 }
 
 #[cfg(test)]

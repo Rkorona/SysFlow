@@ -10,6 +10,7 @@
 //!
 //! Nothing here writes `config.json`, so an action can never affect boot, drift or safe mode.
 
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -21,6 +22,7 @@ use sysflow_core::event::{EventStore, NewSystemEvent};
 use sysflow_core::log::Logger;
 use sysflow_core::sysfs::Sysfs;
 
+use super::foreground;
 use super::model;
 use super::packages;
 use super::scan;
@@ -693,6 +695,174 @@ pub fn sched(
     }))
 }
 
+/// One `stop-all` candidate set: every app package whose running processes all pass the
+/// protection gate, keyed by package, plus what was left out and why.
+pub(crate) struct StopAllSelection {
+    pub packages: BTreeMap<String, Vec<scan::ProcessInfo>>,
+    /// Processes with a package that the gate refused (denylist, SysFlow itself, ...). Kernel
+    /// threads and platform processes have no package, so they are skipped silently above.
+    pub skipped_protected: usize,
+    /// The foreground package, recorded when it was kept out (the default).
+    pub foreground: Option<String>,
+    pub unreadable: usize,
+}
+
+/// Everything `stop-all` may stop: a live app package, not protected, and — unless asked — not the
+/// package that is on screen right now.
+pub(crate) fn select_stoppable(
+    fs: &Sysfs,
+    data_dir: &Path,
+    include_foreground: bool,
+) -> Result<StopAllSelection> {
+    let (infos, unreadable) = scan::read_all(fs)?;
+    let packages = packages::read(fs, data_dir);
+    let foreground = if include_foreground {
+        None
+    } else {
+        foreground::current(data_dir).package
+    };
+
+    let mut selection = StopAllSelection {
+        packages: BTreeMap::new(),
+        skipped_protected: 0,
+        foreground,
+        unreadable: unreadable as usize,
+    };
+    for info in infos {
+        let Some(package) = package_of(&info, &packages) else {
+            continue;
+        };
+        if model::protected_reason(info.uid, info.pid, info.kthread, &info.name, Some(&package))
+            .is_some()
+        {
+            selection.skipped_protected += 1;
+            continue;
+        }
+        if selection.foreground.as_deref() == Some(package.as_str()) {
+            continue;
+        }
+        selection.packages.entry(package).or_default().push(info);
+    }
+    Ok(selection)
+}
+
+/// `process stop-all` — one-shot force-stop of every stoppable app package.
+///
+/// The protection gate decides the set, so "all" never touches protected processes: kernel and
+/// platform processes have no package to stop, and the denylist / SysFlow itself are refused by
+/// `select_stoppable`. The foreground package is kept unless `include_foreground`. All `am` calls
+/// run first, then one shared verification window covers every targeted PID; a package whose `am`
+/// call failed is reported in `failed` and excluded from the verification.
+pub fn stop_all(fs: &Sysfs, data_dir: &Path, include_foreground: bool) -> Result<Value> {
+    let started = Instant::now();
+    let selection = select_stoppable(fs, data_dir, include_foreground)?;
+    let package_count = selection.packages.len();
+
+    if package_count == 0 {
+        log_action(data_dir, "process stop-all packages=0".to_string());
+        return Ok(json!({
+            "stopped": [],
+            "packages": 0,
+            "skipped_protected": selection.skipped_protected,
+            "skipped_unreadable": selection.unreadable,
+            "skipped_foreground": selection.foreground,
+            "failed": [],
+            "pids_after": [],
+            "verified": true,
+            "elapsed_ms": started.elapsed().as_millis() as u64,
+        }));
+    }
+
+    let mut stopped: Vec<String> = Vec::new();
+    let mut failed: Vec<Value> = Vec::new();
+    let mut pids_before = 0usize;
+    for (package, procs) in &selection.packages {
+        pids_before += procs.len();
+        if let Err(error) = validate_package(package) {
+            failed.push(json!({"package": package, "error": error.to_string()}));
+            continue;
+        }
+        let user = procs[0].uid / 100_000;
+        match command::run(
+            "am",
+            &["force-stop", "--user", &user.to_string(), package],
+            AM_TIMEOUT,
+        ) {
+            Ok(_) => stopped.push(package.clone()),
+            Err(error) => failed.push(json!({"package": package, "error": error.to_string()})),
+        }
+    }
+
+    let stopped_set: HashSet<&String> = stopped.iter().collect();
+    let targets: Vec<&scan::ProcessInfo> = selection
+        .packages
+        .iter()
+        .filter(|(package, _)| stopped_set.contains(package))
+        .flat_map(|(_, procs)| procs.iter())
+        .collect();
+    let verify_started = Instant::now();
+    let pids_after = loop {
+        let remaining: Vec<u32> = targets
+            .iter()
+            .filter(|info| still_same_process(fs, info))
+            .map(|info| info.pid)
+            .collect();
+        if remaining.is_empty() || verify_started.elapsed() >= STOP_VERIFY {
+            break remaining;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    };
+
+    let verified = pids_after.is_empty();
+    log_action(
+        data_dir,
+        format!(
+            "process stop-all packages={package_count} stopped={} failed={} before={pids_before} after={}",
+            stopped.len(),
+            failed.len(),
+            pids_after.len()
+        ),
+    );
+    emit_process_event(
+        data_dir,
+        if verified { "info" } else { "warning" },
+        if verified {
+            "Processes stopped"
+        } else {
+            "Stop-all incomplete"
+        },
+        if verified {
+            format!("Force-stopped {} packages.", stopped.len())
+        } else {
+            format!(
+                "Stop-all requested for {} packages, {} pids survived.",
+                stopped.len(),
+                pids_after.len()
+            )
+        },
+        json!({
+            "action": "stop_all",
+            "target": "stop-all",
+            "packages": package_count,
+            "stopped": stopped.len(),
+            "skipped_protected": selection.skipped_protected,
+            "verified": verified,
+        }),
+    );
+
+    Ok(json!({
+        "stopped": stopped,
+        "packages": package_count,
+        "skipped_protected": selection.skipped_protected,
+        "skipped_unreadable": selection.unreadable,
+        "skipped_foreground": selection.foreground,
+        "failed": failed,
+        "pids_after": pids_after,
+        "verified": verified,
+        "elapsed_ms": started.elapsed().as_millis() as u64,
+    }))
+}
+
 pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Result<Value> {
     let dir = format!("{CPUSET_ROOT}/{group}");
     let valid_group = std::fs::metadata(fs.resolve(&dir))
@@ -1065,6 +1235,7 @@ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Res
 #[cfg(test)]
 mod tests {
     use std::path::{Path, PathBuf};
+    use sysflow_core::cache;
 
     use super::*;
 
@@ -1178,6 +1349,65 @@ mod tests {
         let detail = error.detail.unwrap();
         assert_eq!(detail["protected"], true);
         assert_eq!(detail["reason"], "pid ≤ 2 is the kernel");
+    }
+
+    #[test]
+    fn stop_all_selects_only_unprotected_packages_and_keeps_the_foreground() {
+        let root = temp("stop-all-select");
+        add_process(&root, 10101, "com.example.game", 10101);
+        add_process(&root, 10102, "com.example.notes", 10102);
+        add_process(&root, 10213, "com.android.systemui", 10157);
+        add_process(&root, 10500, "sysflow", 10100);
+        add_process(&root, 300, "netd", 1000);
+        write(
+            &root,
+            "data/system/packages.list",
+            "com.example.game 10101 0 /data 0 0 1 0 0 0\ncom.example.notes 10102 0 /data 0 0 1 0 0 0\ncom.android.systemui 10157 0 /data 0 0 1 0 0 0\n",
+        );
+        let fs = Sysfs::new(&root);
+        let data = root.join("data-dir");
+
+        let selection = select_stoppable(&fs, &data, true).unwrap();
+        let names: Vec<&String> = selection.packages.keys().collect();
+        assert_eq!(names, ["com.example.game", "com.example.notes"]);
+        // Only processes with a package the gate refused are counted: systemui (denylist). The
+        // sysflow binary's cmdline maps to no package, so it is skipped silently, like netd and
+        // pid 1 (no package either) — none of them can be force-stopped anyway.
+        assert_eq!(selection.skipped_protected, 1);
+
+        // With the foreground lookup, com.example.game is the resumed app and drops out. The
+        // cache lives under the data dir, which is where `foreground::current` reads it.
+        write(
+            &data,
+            "state/process_foreground.json",
+            &format!(
+                "{{\"package\":\"com.example.game\",\"user\":0,\"generated_at\":{}}}",
+                cache::now_secs()
+            ),
+        );
+        let with_fg = select_stoppable(&fs, &data, false).unwrap();
+        assert_eq!(
+            with_fg.packages.keys().collect::<Vec<_>>(),
+            ["com.example.notes"]
+        );
+        assert_eq!(with_fg.foreground.as_deref(), Some("com.example.game"));
+    }
+
+    #[test]
+    fn stop_all_without_candidates_is_an_empty_success() {
+        let root = temp("stop-all-empty");
+        add_process(&root, 10213, "com.android.systemui", 10157);
+        write(
+            &root,
+            "data/system/packages.list",
+            "com.android.systemui 10157 0 /data 0 0 1 0 0 0\n",
+        );
+        let fs = Sysfs::new(&root);
+        let out = stop_all(&fs, &root.join("data-dir"), true).unwrap();
+        assert_eq!(out["packages"], 0);
+        assert_eq!(out["stopped"], serde_json::json!([]));
+        assert_eq!(out["verified"], true);
+        assert_eq!(out["skipped_protected"], 1);
     }
 
     #[test]

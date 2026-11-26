@@ -95,6 +95,9 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
     var moduleActivityOpen by rememberSaveable { mutableStateOf(false) }
     // CPU management can be opened either from Overview or from the Modules hub.
     var cpuOpenedFromOverview by rememberSaveable { mutableStateOf(false) }
+    // Same for the mem / storage details opened from the overview cards.
+    var memOpenedFromOverview by rememberSaveable { mutableStateOf(false) }
+    var storageOpenedFromOverview by rememberSaveable { mutableStateOf(false) }
     var wasAwayFromOverview by rememberSaveable { mutableStateOf(false) }
 
     val battery = remember(state.snapshot) { BatterySnapshot.from(state.snapshot?.modules?.get("battery")) }
@@ -183,7 +186,8 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
             }
             route.destination == Destination.Modules && memDetail -> {
                 memDetail = false
-                current = Destination.Modules
+                current = if (memOpenedFromOverview) Destination.Overview else Destination.Modules
+                memOpenedFromOverview = false
             }
             route.destination == Destination.Modules && processDetail -> {
                 processDetail = false
@@ -191,7 +195,8 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
             }
             route.destination == Destination.Modules && storageDetail -> {
                 storageDetail = false
-                current = Destination.Modules
+                current = if (storageOpenedFromOverview) Destination.Overview else Destination.Modules
+                storageOpenedFromOverview = false
             }
             route.destination == Destination.Modules && route.batteryDetail -> {
                 batteryDetail = false
@@ -218,6 +223,8 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                 batteryRankingOpen = false
                 cpuOpenedFromOverview = false
                 batteryOpenedFromOverview = false
+                memOpenedFromOverview = false
+                storageOpenedFromOverview = false
                 current = Destination.Overview
             }
         }
@@ -292,6 +299,22 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                             current = Destination.Modules
                             batteryDetail = true
                         },
+                        onOpenMem = {
+                            cpuDetail = false
+                            batteryDetail = false
+                            storageDetail = false
+                            memDetail = true
+                            memOpenedFromOverview = true
+                            current = Destination.Modules
+                        },
+                        onOpenStorage = {
+                            cpuDetail = false
+                            batteryDetail = false
+                            memDetail = false
+                            storageDetail = true
+                            storageOpenedFromOverview = true
+                            current = Destination.Modules
+                        },
                     )
                 }
             }
@@ -339,6 +362,7 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                             memDetail = false
                             processDetail = false
                             storageDetail = true
+                            storageOpenedFromOverview = false
                             current = Destination.Modules
                         },
                         onOpenProcess = {
@@ -354,6 +378,7 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                             batteryDetail = false
                             wakelockDetail = false
                             memDetail = true
+                            memOpenedFromOverview = false
                             current = Destination.Modules
                         },
                         onOpenWakelock = {
@@ -466,6 +491,8 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                     moduleActivityOpen = false
                     cpuOpenedFromOverview = false
                     batteryOpenedFromOverview = false
+                    memOpenedFromOverview = false
+                    storageOpenedFromOverview = false
                 },
                 scrollBehavior = navScrollBehavior,
             )

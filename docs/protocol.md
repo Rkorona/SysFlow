@@ -1094,14 +1094,20 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 - `name` strips the directory of an absolute `cmdline` (`/system/bin/netd` → `netd`); the full path
   remains in `cmdline`.
 - `limit` defaults to 50 and is clamped to 1..200. Sorting is applied **before** truncation; `truncated`
-  says more rows exist. `--filter system` = `uid < 10000`; `query` is a case-insensitive substring of
-  package or name. `skipped` counts processes that could not be read (exit mid-scan, SELinux).
+  says more rows exist. `--filter` takes `all`, `user` (`uid >= 10000`), `system` (`uid < 10000`) or
+  `protected` (every process the protection gate refuses: `pid ≤ 2`, kernel threads, platform UIDs,
+  the denylist, SysFlow itself); `query` is a case-insensitive substring of package or name.
+  `skipped` counts processes that could not be read (exit mid-scan, SELinux).
 - The result is **not cached**; only the foreground lookup (5 s) and the UID→package map (10 min) are.
 - `cpuset_groups` lists the existing `/dev/cpuset/<group>` directories that have a `tasks` node. It is
   the option list for `process cpuset`; when empty, the cpuset action must not be offered.
 - `frozen` is present when a cgroup freezer reports state: v2 `cgroup.freeze` / `cgroup.events`
   (`frozen 1` covers parent-inherited freezes), else v1 `/dev/freezer/<path>/freezer.state`. It is
   omitted when neither mechanism exists.
+- `stoppable` is the `stop-all` budget: how many running app packages the protection gate would
+  accept right now (unprotected, with a package, minus the foreground package). It is counted over
+  **every** process, independent of `--filter` / `--query` / `limit`, so clients can show it on the
+  unfiltered list too.
 
 #### `process get <pid>`
 
@@ -1184,6 +1190,29 @@ Each PID is set with `sched_setscheduler(2)` and read back from `/proc/<pid>/sta
 changed the verb fails with the first mapped error (`permission` for `EACCES` / `EPERM`, else `io`).
 High risk, hidden behind the experimental section, not persisted.
 
+#### `process stop-all [--foreground]`
+
+```json
+{"v":1,"ok":true,"data":{
+  "stopped":["com.example.game","com.example.notes"],"packages":2,
+  "skipped_protected":1,"skipped_unreadable":0,"skipped_foreground":"io.sysflow",
+  "failed":[],"pids_after":[],"verified":true,"elapsed_ms":1812}}
+```
+
+One-shot force-stop of **every stoppable app package**: a package qualifies when it owns a running
+process, that process passes the protection gate, and (by default) it is not the foreground package.
+Protected processes are never part of the selection — kernel and platform processes have no package
+to stop, and the denylist / SysFlow itself are refused outright — so "all" can never stop systemui,
+telecom or SysFlow. Each package runs `am force-stop --user <user> <package>` exactly like
+`process stop`; `--foreground` adds the foreground package back. All `am` calls run first, then one
+shared verification window (2 s) covers every targeted PID: `pids_after` lists survivors (a PID that
+still exists with the same start time), `verified` says all of them are gone, and `failed` carries
+the packages whose `am` call errored (excluded from verification). `skipped_protected` counts
+processes **with a package** the gate refused; kernel threads and platform processes have no package
+and are skipped silently. Emits one `process_action` event with `action:"stop_all"`,
+`target:"stop-all"`, the package / stopped / skipped counts and `verified`. High risk, behind the
+experimental section in the APK; the CLI exposes it directly.
+
 #### `process cpuset <pid|package> <group>` (experimental)
 
 ```json
@@ -1243,9 +1272,9 @@ failures are ignored so they never fail the action.
 
 #### `caps` features
 
-Free-form strings owned by the module: `list`, `foreground`, `stop`, `oom_score_adj`, `renice`,
-`sched`, `cpuset`, `freeze`. Clients must treat an absent feature as "hide the control", exactly as
-for other modules. `supported:false` with a `reason` hides the whole module.
+Free-form strings owned by the module: `list`, `foreground`, `stop`, `stop_all`, `oom_score_adj`,
+`renice`, `sched`, `cpuset`, `freeze`. Clients must treat an absent feature as "hide the control",
+exactly as for other modules. `supported:false` with a `reason` hides the whole module.
 
 ### 3.26 Storage module (`storage.*`)
 

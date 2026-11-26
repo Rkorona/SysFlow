@@ -51,6 +51,8 @@ pub enum Filter {
     All,
     User,
     System,
+    /// The protection gate, as a category: everything `stop-all` refuses to touch.
+    Protected,
 }
 
 impl Filter {
@@ -59,15 +61,18 @@ impl Filter {
             "all" => Some(Self::All),
             "user" => Some(Self::User),
             "system" => Some(Self::System),
+            "protected" => Some(Self::Protected),
             _ => None,
         }
     }
 
-    fn keeps(self, uid: u32) -> bool {
+    fn keeps(self, row: &Row) -> bool {
+        let uid = row.info.uid;
         match self {
             Filter::All => true,
             Filter::User => uid >= 10_000,
             Filter::System => uid < 10_000,
+            Filter::Protected => row.protected.is_some(),
         }
     }
 }
@@ -503,7 +508,19 @@ pub fn list(fs: &Sysfs, data_dir: &Path, opts: &ListOptions) -> Value {
         opts.with_foreground,
     );
 
-    rows.retain(|row| opts.filter.keeps(row.info.uid));
+    // "Stoppable" is the kill-all budget: a running app package the protection gate would accept,
+    // minus the foreground package (which `stop-all` keeps unless asked otherwise). Counted over
+    // every process, so the number stays true while the list view is filtered or truncated.
+    let stoppable = rows
+        .iter()
+        .filter(|row| {
+            row.package.is_some()
+                && row.protected.is_none()
+                && foreground_package.as_deref() != row.package.as_deref()
+        })
+        .count();
+
+    rows.retain(|row| opts.filter.keeps(row));
     if let Some(query) = opts.query.as_deref().map(str::to_lowercase) {
         rows.retain(|row| {
             row.sort_name.contains(&query)
@@ -529,6 +546,7 @@ pub fn list(fs: &Sysfs, data_dir: &Path, opts: &ListOptions) -> Value {
         "returned": processes.len(),
         "truncated": matching > processes.len(),
         "skipped": skipped,
+        "stoppable": stoppable,
         "cpuset_groups": cpuset_groups,
         "foreground": {
             "available": fg.available,
@@ -893,6 +911,23 @@ mod tests {
         );
         assert_eq!(system["returned"], 1);
         assert_eq!(system["processes"][0]["pid"], 1);
+
+        let protected = list(
+            &fs,
+            &data,
+            &ListOptions {
+                filter: Filter::Protected,
+                sort: SortKey::Pid,
+                sample_ms: 0,
+                with_foreground: false,
+                ..ListOptions::default()
+            },
+        );
+        assert_eq!(protected["returned"], 1);
+        assert_eq!(protected["processes"][0]["pid"], 1);
+        // The kill-all budget ignores the filter: both apps are stoppable, init is not.
+        assert_eq!(protected["stoppable"], 2);
+        assert_eq!(user["stoppable"], 2);
 
         let query = list(
             &fs,

@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.navigationBars
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Bedtime
@@ -152,6 +153,43 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                     onToggleSelected = viewModel::toggleSelected,
                     onOpen = viewModel::loadDetail,
                 )
+            }
+            // The KillMyApps-style one-tap clean: force-stops every unprotected app package in
+            // one shot; the module refuses protected processes and keeps the foreground app.
+            if (!state.selectionMode && list != null && "stop_all" in state.features) {
+                Surface(
+                    onClick = {
+                        if (state.actionRunning == null) {
+                            confirm = stopAllConfirm(list.stoppable) { viewModel.stopAll() }
+                        }
+                    },
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(horizontal = 16.dp, bottom = 16.dp + bottomInset),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 6.dp,
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(
+                            Icons.Rounded.DeleteForever,
+                            contentDescription = null,
+                            modifier = Modifier.size(20.dp),
+                        )
+                        Text("全部停止", style = MaterialTheme.typography.titleSmallEmphasized)
+                        Spacer(Modifier.weight(1f))
+                        Text(
+                            "${list.stoppable} 个应用",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
             if (state.selectionMode && list != null) {
                 val selectedEntries = list.entries.filter { it.pid in state.selectedPids }
@@ -365,6 +403,17 @@ private fun ConfirmDialog(request: ProcessConfirm, onDismiss: () -> Unit) {
         },
     )
 }
+
+/** Stop-all reads its budget from the module's `stoppable` count, not from the filtered view. */
+private fun stopAllConfirm(count: Int, onConfirm: () -> Unit) = ProcessConfirm(
+    title = "全部停止",
+    text = "将一次性强制停止 $count 个未受保护的应用。" +
+        "受保护进程和当前前台应用会被保留，后台同步、下载、播放都会中断。",
+    confirmLabel = "全部停止",
+    icon = Icons.Rounded.DeleteForever,
+    danger = true,
+    onConfirm = onConfirm,
+)
 
 private data class ProcessConfirm(
     val title: String,

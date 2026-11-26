@@ -62,6 +62,8 @@ data class ProcessList(
     val returned: Int,
     val truncated: Boolean,
     val skipped: Int,
+    /** Packages `stop-all` would stop right now: unprotected, running, not the foreground app. */
+    val stoppable: Int = 0,
     val sampleMs: Long,
     val clockTicks: Long,
     /** Existing `/dev/cpuset` groups; empty hides the cpuset action. */
@@ -133,6 +135,31 @@ data class ProcessActionResult(
 )
 
 /** Parsing of `sysflow caps`, kept here so the screen can hide actions the device lacks. */
+/** One `process stop-all` response: what ran, what the protection gate kept out. */
+data class ProcessStopAllResult(
+    val stopped: List<String>,
+    val packages: Int,
+    val skippedProtected: Int,
+    val skippedUnreadable: Int,
+    val skippedForeground: String?,
+    val failed: List<String>,
+    val pidsAfter: List<Int>,
+    val verified: Boolean,
+)
+
+fun parseProcessStopAll(json: JsonObject): ProcessStopAllResult = ProcessStopAllResult(
+    stopped = json.array("stopped").mapNotNull { (it as? JsonPrimitive)?.content },
+    packages = json.int("packages") ?: 0,
+    skippedProtected = json.int("skipped_protected") ?: 0,
+    skippedUnreadable = json.int("skipped_unreadable") ?: 0,
+    skippedForeground = json.string("skipped_foreground"),
+    failed = json.array("failed")
+        .mapNotNull { (it as? JsonObject)?.get("package") }
+        .mapNotNull { (it as? JsonPrimitive)?.content },
+    pidsAfter = json.array("pids_after").mapNotNull { (it as? JsonPrimitive)?.intOrNull },
+    verified = json.bool("verified") ?: false,
+)
+
 fun processFeatures(caps: CapsData): Set<String> =
     caps.modules["process"]?.features?.toSet() ?: emptySet()
 
@@ -145,6 +172,7 @@ fun parseProcessList(json: JsonObject): ProcessList {
         returned = json.int("returned") ?: 0,
         truncated = json.bool("truncated") ?: false,
         skipped = json.int("skipped") ?: 0,
+        stoppable = json.int("stoppable") ?: 0,
         sampleMs = json.long("sample_ms") ?: 0L,
         clockTicks = json.long("clock_ticks") ?: 100L,
         cpusetGroups = json.array("cpuset_groups").mapNotNull { (it as? JsonPrimitive)?.contentOrNull },

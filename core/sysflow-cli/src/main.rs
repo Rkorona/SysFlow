@@ -246,6 +246,7 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
         "list" if module == "process" => process_list::run(reg, rest),
         "get" if module == "process" => process_get::run(reg, rest),
         "stop" if module == "process" => process_actions::stop(reg, rest),
+        "stop-all" if module == "process" => process_actions::stop_all(reg, rest),
         "oom" if module == "process" => process_actions::oom(reg, rest),
         "renice" if module == "process" => process_actions::renice(reg, rest),
         "sched" if module == "process" => process_actions::sched(reg, rest),

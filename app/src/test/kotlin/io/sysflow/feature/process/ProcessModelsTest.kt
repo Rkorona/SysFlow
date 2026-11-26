@@ -172,6 +172,22 @@ class ProcessModelsTest {
     }
 
     @Test
+    fun list_parses_the_stoppable_budget() {
+        val list = parseProcessList(
+            json(
+                """
+                {"available": true, "total": 5, "returned": 1, "truncated": false, "skipped": 0,
+                 "stoppable": 3, "sample_ms": 300, "clock_ticks": 100, "cpuset_groups": [],
+                 "foreground": {"available": false, "package": null, "pid": null, "user": 0,
+                                "cached": false, "disabled": true},
+                 "processes": []}
+                """,
+            ),
+        )
+        assertEquals(3, list.stoppable)
+    }
+
+    @Test
     fun detail_parses_the_policy_name_and_frozen_state() {
         val detail = parseProcessDetail(
             json(
@@ -221,6 +237,28 @@ class ProcessModelsTest {
         assertEquals("com.example.app", stop.pkg)
         assertNull(stop.target)
         assertEquals(true, stop.verified)
+    }
+
+    @Test
+    fun stop_all_result_parses_counts_and_skips() {
+        val result = parseProcessStopAll(
+            json(
+                """
+                {"stopped": ["com.example.game", "com.example.notes"], "packages": 2,
+                 "skipped_protected": 3, "skipped_unreadable": 1,
+                 "skipped_foreground": "io.sysflow",
+                 "failed": [{"package": "com.example.bad", "error": "timed out"}],
+                 "pids_after": [23123], "verified": false}
+                """,
+            ),
+        )
+        assertEquals(listOf("com.example.game", "com.example.notes"), result.stopped)
+        assertEquals(2, result.packages)
+        assertEquals(3, result.skippedProtected)
+        assertEquals("io.sysflow", result.skippedForeground)
+        assertEquals(listOf("com.example.bad"), result.failed)
+        assertEquals(listOf(23123), result.pidsAfter)
+        assertFalse(result.verified)
     }
 
     @Test

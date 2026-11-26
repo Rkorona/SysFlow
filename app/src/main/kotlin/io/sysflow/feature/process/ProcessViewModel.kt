@@ -140,6 +140,20 @@ class ProcessViewModel(
         _state.update { it.copy(experimental = !it.experimental) }
     }
 
+    /** One-shot stop-all: the module refuses protected processes and keeps the foreground app. */
+    fun stopAll() {
+        runAction("全部停止") {
+            val result = parseProcessStopAll(client.processStopAll())
+            buildList {
+                add("已停止 ${result.stopped.size} 个应用（共 ${result.packages} 个可停）")
+                if (result.skippedProtected > 0) add("跳过 ${result.skippedProtected} 个受保护进程")
+                if (result.skippedForeground != null) add("保留前台应用")
+                if (result.failed.isNotEmpty()) add("${result.failed.size} 个失败")
+                if (!result.verified) add("部分进程仍存活")
+            }.joinToString("，")
+        }
+    }
+
     /** Poll cadence is saved locally; the screen's loop keys off `pollMs`, so a change restarts it. */
     fun setPollMs(ms: Int) {
         val value = ProcessTuning.clampPoll(ms)

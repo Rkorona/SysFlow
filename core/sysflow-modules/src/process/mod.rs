@@ -107,6 +107,7 @@ impl Module for ProcessModule {
         }
         if self.fs.exists("/system/bin/am") {
             features.push("stop");
+            features.push("stop_all");
         }
         if self.fs.exists("/system/bin/renice") {
             features.push("renice");
