@@ -162,8 +162,10 @@ Protection is evaluated against the **current** process state: `pid ≤ 2`, kern
 expansion contains any protected PID is rejected as a whole. Nothing here writes `config.json`, so an
 action cannot affect boot, drift or safe mode. Every executed action also writes a structured
 `process_action` event to the module-owned journal (`docs/event-system.md`), which the APK shows in
-its event screens. See `docs/protocol.md` §3.25, `docs/process-module-plan.md` and
-`docs/modules/process.md`.
+its event screens. The APK list page tunes its own cadence: the poll interval (1–10 s) and the
+silent-poll sample window (200–2000 ms, clamped by the module) are adjustable from the tune entry in
+the list header and saved on the device. See `docs/protocol.md` §3.25, `docs/process-module-plan.md`
+and `docs/modules/process.md`.
 
 ## Storage module
 

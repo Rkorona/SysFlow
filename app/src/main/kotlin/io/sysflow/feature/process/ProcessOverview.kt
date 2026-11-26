@@ -81,6 +81,7 @@ internal fun ProcessListContent(
     onFilter: (String) -> Unit,
     onSort: (String) -> Unit,
     onToggleExperimental: () -> Unit,
+    onOpenTuning: () -> Unit,
     onLoadMore: () -> Unit,
     onToggleSelectionMode: () -> Unit,
     onEnterSelection: (Int) -> Unit,
@@ -163,22 +164,34 @@ internal fun ProcessListContent(
                     "按${sortLabel(state.sort)}排序 · 点按查看详情，长按多选"
                 },
                 action = {
-                    FilterChip(
-                        selected = state.selectionMode,
-                        onClick = onToggleSelectionMode,
-                        label = { Text(if (state.selectionMode) "完成" else "多选") },
-                        leadingIcon = if (state.selectionMode) {
-                            {
-                                Icon(
-                                    Icons.Rounded.Check,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(16.dp),
-                                )
-                            }
-                        } else {
-                            null
-                        },
-                    )
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        IconButton(onClick = onOpenTuning) {
+                            Icon(
+                                Icons.Rounded.Tune,
+                                contentDescription = "刷新设置",
+                                modifier = Modifier.size(20.dp),
+                            )
+                        }
+                        FilterChip(
+                            selected = state.selectionMode,
+                            onClick = onToggleSelectionMode,
+                            label = { Text(if (state.selectionMode) "完成" else "多选") },
+                            leadingIcon = if (state.selectionMode) {
+                                {
+                                    Icon(
+                                        Icons.Rounded.Check,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(16.dp),
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                        )
+                    }
                 },
                 modifier = Modifier.padding(bottom = 8.dp),
             )

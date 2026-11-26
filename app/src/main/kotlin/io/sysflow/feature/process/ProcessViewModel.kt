@@ -18,7 +18,10 @@ import java.util.Locale
  * the polling loop, as on every other page — the APK has no background work). `get` and the actions
  * are pull-on-demand. Nothing here persists: the module treats every action as one-shot.
  */
-class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
+class ProcessViewModel(
+    private val client: SysFlowClient,
+    private val tuningStore: ProcessTuningStore,
+) : ViewModel() {
 
     data class UiState(
         val loading: Boolean = true,
@@ -31,7 +34,11 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
         val filter: String = "all",
         val query: String = "",
         val limit: Int = DEFAULT_LIMIT,
-        /** A user-initiated refresh uses a longer sampling window than the 2 s poll. */
+        /** How often the screen polls the list while visible (saved locally, see [ProcessTuning]). */
+        val pollMs: Int = ProcessTuning.DEFAULT_POLL_MS,
+        /** Sampling window of a silent poll; the module clamps `--sample-ms` to 200..2000. */
+        val sampleMs: Int = ProcessTuning.DEFAULT_SAMPLE_MS,
+        /** A user-initiated refresh uses a longer sampling window than the poll. */
         val refreshing: Boolean = false,
         /** Human label of the action in flight, or `null`. */
         val actionRunning: String? = null,
@@ -52,11 +59,13 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
     val state = _state.asStateFlow()
 
     init {
+        val saved = tuningStore.load()
+        _state.update { it.copy(pollMs = saved.pollMs, sampleMs = saved.sampleMs) }
         refresh()
         loadFeatures()
     }
 
-    /** Silent polls use the short sample window; pull-to-refresh uses 800 ms for a steadier value. */
+    /** Silent polls use the configured window; pull-to-refresh uses 800 ms for a steadier value. */
     fun refresh(silent: Boolean = false) {
         viewModelScope.launch {
             val current = _state.value
@@ -67,7 +76,7 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
                     sort = current.sort,
                     filter = current.filter,
                     query = current.query.ifBlank { null },
-                    sampleMs = if (silent) POLL_SAMPLE_MS else REFRESH_SAMPLE_MS,
+                    sampleMs = if (silent) current.sampleMs else REFRESH_SAMPLE_MS,
                     foreground = true,
                 )
             }.onSuccess { json ->
@@ -129,6 +138,21 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
 
     fun toggleExperimental() {
         _state.update { it.copy(experimental = !it.experimental) }
+    }
+
+    /** Poll cadence is saved locally; the screen's loop keys off `pollMs`, so a change restarts it. */
+    fun setPollMs(ms: Int) {
+        val value = ProcessTuning.clampPoll(ms)
+        _state.update { it.copy(pollMs = value) }
+        tuningStore.save(value, _state.value.sampleMs)
+    }
+
+    /** The next silent poll uses the new window; refresh once so the footer's value updates too. */
+    fun setSampleMs(ms: Int) {
+        val value = ProcessTuning.clampSample(ms)
+        _state.update { it.copy(sampleMs = value) }
+        tuningStore.save(_state.value.pollMs, value)
+        refresh(silent = true)
     }
 
     fun loadMore() {
@@ -378,7 +402,6 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
         const val DEFAULT_LIMIT = 80
         const val LIMIT_STEP = 60
         const val MAX_LIMIT = 200
-        const val POLL_SAMPLE_MS = 300
         const val REFRESH_SAMPLE_MS = 800
     }
 }

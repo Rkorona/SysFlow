@@ -30,12 +30,12 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.toShape
@@ -77,16 +77,18 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     var confirm by remember { mutableStateOf<ProcessConfirm?>(null) }
+    var showTuning by remember { mutableStateOf(false) }
 
     val sheetOpen = state.detailLoading || state.detail != null
     BackHandler(enabled = state.selectionMode && !sheetOpen) { viewModel.clearSelection() }
 
     // Only while the page is visible; a running action or multi-select pauses the poll so the list
-    // does not jump under the user's finger.
-    LaunchedEffect(Unit) {
+    // does not jump under the user's finger. Keyed on the interval so a change from the tune dialog
+    // restarts the loop with the new cadence instead of waiting out the rest of the old one.
+    LaunchedEffect(state.pollMs) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
-                delay(2_000)
+                delay(state.pollMs.toLong())
                 val current = viewModel.state.value
                 if (current.actionRunning == null && !current.selectionMode) {
                     viewModel.refresh(silent = true)
@@ -143,6 +145,7 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                     onFilter = viewModel::setFilter,
                     onSort = viewModel::setSort,
                     onToggleExperimental = viewModel::toggleExperimental,
+                    onOpenTuning = { showTuning = true },
                     onLoadMore = viewModel::loadMore,
                     onToggleSelectionMode = viewModel::toggleSelectionMode,
                     onEnterSelection = viewModel::enterSelectionWith,
@@ -155,20 +158,29 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                 val packageCount = selectedEntries.mapNotNull { it.packageName }.distinct().size
                 val canBatchStop = "stop" in state.features && packageCount > 0
                 val canBatchFreeze = state.experimental && "freeze" in state.features && selectedEntries.isNotEmpty()
-                HorizontalFloatingToolbar(
-                    expanded = true,
+                // A plain pill instead of HorizontalFloatingToolbar: with text + button content
+                // the toolbar mis-measures and renders as a huge oval over the list (the nav bar's
+                // IconButton-only rows are its one working pattern). This container is fixed-size
+                // and fully under our control; the colors match the toolbar's standard look.
+                Surface(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(bottom = 16.dp + bottomInset),
+                    shape = MaterialTheme.shapes.extraLarge,
+                    color = MaterialTheme.colorScheme.surfaceContainerHighest,
+                    contentColor = MaterialTheme.colorScheme.onSurface,
+                    tonalElevation = 3.dp,
+                    shadowElevation = 6.dp,
                 ) {
                     Row(
+                        modifier = Modifier.padding(start = 12.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(
                             "已选 ${state.selectedPids.size}",
                             style = MaterialTheme.typography.labelLarge,
-                            modifier = Modifier.padding(horizontal = 8.dp),
+                            modifier = Modifier.padding(start = 4.dp),
                             maxLines = 1,
                         )
                         if (canBatchStop) {
@@ -237,7 +249,71 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
     }
 
     confirm?.let { request -> ConfirmDialog(request = request, onDismiss = { confirm = null }) }
+    if (showTuning) {
+        TuningDialog(
+            pollMs = state.pollMs,
+            sampleMs = state.sampleMs,
+            onPoll = viewModel::setPollMs,
+            onSample = viewModel::setSampleMs,
+            onDismiss = { showTuning = false },
+        )
+    }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Poll tuning
+// ---------------------------------------------------------------------------------------------
+
+/** Poll interval and sampling window of the list, both saved on the device (not module state). */
+@Composable
+private fun TuningDialog(
+    pollMs: Int,
+    sampleMs: Int,
+    onPoll: (Int) -> Unit,
+    onSample: (Int) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    val scheme = MaterialTheme.colorScheme
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        shape = MaterialTheme.shapes.extraLarge,
+        containerColor = scheme.surfaceContainerHigh,
+        title = { Text("列表刷新", style = MaterialTheme.typography.headlineSmallEmphasized) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("轮询间隔", style = MaterialTheme.typography.titleSmallEmphasized)
+                    ConnectedChoiceRow(
+                        options = ProcessTuning.POLL_CHOICES,
+                        selected = pollMs,
+                        label = { pollLabel(it) },
+                        onSelect = onPoll,
+                    )
+                }
+                Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Text("采样窗口", style = MaterialTheme.typography.titleSmallEmphasized)
+                    ConnectedChoiceRow(
+                        options = ProcessTuning.SAMPLE_CHOICES,
+                        selected = sampleMs,
+                        label = { "$it ms" },
+                        onSelect = onSample,
+                    )
+                }
+                Text(
+                    "间隔越短列表越实时，窗口越长 CPU% 越平稳；设置保存在本机。" +
+                        "模块会把采样窗口钳制在 200–2000 ms。",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = scheme.onSurfaceVariant,
+                )
+            }
+        },
+        confirmButton = {
+            Button(onClick = onDismiss, shapes = ButtonDefaults.shapes()) { Text("完成") }
+        },
+    )
+}
+
+private fun pollLabel(ms: Int): String = "${ms / 1000} 秒"
 
 // ---------------------------------------------------------------------------------------------
 // Confirmation

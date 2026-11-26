@@ -11,6 +11,7 @@ import io.sysflow.feature.adaptive.AdaptiveViewModel
 import io.sysflow.feature.home.AppViewModel
 import io.sysflow.feature.settings.SettingsViewModel
 import io.sysflow.feature.mem.MemViewModel
+import io.sysflow.feature.process.ProcessTuningStore
 import io.sysflow.feature.process.ProcessViewModel
 import io.sysflow.feature.storage.StorageViewModel
 import io.sysflow.feature.wakelock.WakelockViewModel
@@ -31,6 +32,7 @@ private val appModule = module {
             .build()
     }
     single { EventRepository(get(), get()) }
+    single { ProcessTuningStore(androidContext()) }
     viewModel { AppViewModel(get(), get()) }
     viewModel { CpuViewModel(get()) }
     viewModel { CpusetViewModel(get()) }
@@ -40,7 +42,7 @@ private val appModule = module {
     viewModel { DiagnosticsViewModel(get()) }
     viewModel { WakelockViewModel(get()) }
     viewModel { MemViewModel(get()) }
-    viewModel { ProcessViewModel(get()) }
+    viewModel { ProcessViewModel(get(), get()) }
     viewModel { StorageViewModel(get()) }
 }
 
