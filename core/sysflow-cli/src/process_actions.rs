@@ -1,4 +1,4 @@
-//! `sysflow process stop|oom|renice|cpuset|freeze|unfreeze` — one-shot actions.
+//! `sysflow process stop|oom|renice|sched|cpuset|freeze|unfreeze` — one-shot actions.
 //!
 //! The CLI only parses arguments; resolution, protection, identity re-checks and read-back all live
 //! in `sysflow_modules::process::actions`, where they are covered by host tests.
@@ -27,6 +27,25 @@ pub fn renice(reg: &Registry, rest: &[&str]) -> Result<Value> {
     let target = parse_target(args.first(), "renice")?;
     let nice = parse_i64(args.get(1), "renice", "nice")?;
     actions::renice(&reg.ctx().sysfs, &reg.ctx().data_dir, &target, nice)
+}
+
+pub fn sched(reg: &Registry, rest: &[&str]) -> Result<Value> {
+    let args = positionals(rest);
+    let target = parse_target(args.first(), "sched")?;
+    let policy = args.get(1).ok_or_else(|| {
+        Error::invalid_arg("process sched requires a policy (other|fifo|rr|batch|idle)")
+    })?;
+    let priority = args
+        .get(2)
+        .map(|value| parse_i64(Some(value), "sched", "priority"))
+        .transpose()?;
+    actions::sched(
+        &reg.ctx().sysfs,
+        &reg.ctx().data_dir,
+        &target,
+        policy,
+        priority,
+    )
 }
 
 pub fn cpuset(reg: &Registry, rest: &[&str]) -> Result<Value> {
@@ -114,5 +133,17 @@ mod tests {
         let args = ["com.example.app", "--user", "10"];
         assert_eq!(flag(&args, "--user"), Some("10"));
         assert_eq!(flag(&["com.example.app"], "--user"), None);
+    }
+
+    #[test]
+    fn sched_positionals_accept_policy_and_optional_priority() {
+        assert_eq!(
+            positionals(&["10123", "fifo", "10"]),
+            vec!["10123", "fifo", "10"]
+        );
+        assert_eq!(
+            positionals(&["com.example.app", "other"]),
+            vec!["com.example.app", "other"]
+        );
     }
 }

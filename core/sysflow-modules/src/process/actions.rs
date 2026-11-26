@@ -1,4 +1,4 @@
-//! One-shot process actions: `stop`, `oom`, `renice`, `cpuset`, `freeze` / `unfreeze`.
+//! One-shot process actions: `stop`, `oom`, `renice`, `sched`, `cpuset`, `freeze` / `unfreeze`.
 //!
 //! Every action follows the same order, and the order is the safety property:
 //!
@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 
 use sysflow_core::command;
 use sysflow_core::error::{Error, Result};
+use sysflow_core::event::{EventStore, NewSystemEvent};
 use sysflow_core::log::Logger;
 use sysflow_core::sysfs::Sysfs;
 
@@ -29,12 +30,19 @@ const TOOL_TIMEOUT: Duration = Duration::from_secs(3);
 const STOP_VERIFY: Duration = Duration::from_secs(2);
 const CPUSET_ROOT: &str = "/dev/cpuset";
 const FREEZE_ROOT: &str = "/sys/fs/cgroup";
+const V1_FREEZE_ROOT: &str = "/dev/freezer";
 
 /// `PRIO_PROCESS` for `setpriority(2)`.
 const PRIO_PROCESS: i32 = 0;
 
+#[repr(C)]
+struct SchedParam {
+    sched_priority: i32,
+}
+
 extern "C" {
     fn setpriority(which: i32, who: u32, prio: i32) -> i32;
+    fn sched_setscheduler(pid: i32, policy: i32, param: *const SchedParam) -> i32;
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -170,6 +178,21 @@ fn log_action(data_dir: &Path, message: String) {
     Logger::new(data_dir.join("log").join("sysflow.log")).info(&message);
 }
 
+fn emit_process_event(
+    data_dir: &Path,
+    severity: &str,
+    title: impl Into<String>,
+    message: impl Into<String>,
+    metadata: Value,
+) {
+    let store = EventStore::new(data_dir);
+    let event = NewSystemEvent::new("process", "action", "process_action", severity, title)
+        .message(message)
+        .metadata(metadata);
+    // Best-effort telemetry: event store failures must never fail the process action.
+    let _ = store.emit_sanitized(event);
+}
+
 pub fn stop(fs: &Sysfs, data_dir: &Path, target: &Target, user: Option<u32>) -> Result<Value> {
     let resolved = resolve(fs, data_dir, target, user)?;
     let package = match target {
@@ -214,18 +237,43 @@ pub fn stop(fs: &Sysfs, data_dir: &Path, target: &Target, user: Option<u32>) -> 
         std::thread::sleep(Duration::from_millis(100));
     };
 
+    let verified = pids_after.is_empty();
     log_action(
         data_dir,
         format!(
             "process stop package={package} user={user} before={pids_before:?} after={pids_after:?}"
         ),
     );
+    emit_process_event(
+        data_dir,
+        if verified { "info" } else { "warning" },
+        if verified {
+            "Process stopped"
+        } else {
+            "Process stop incomplete"
+        },
+        if verified {
+            format!("Force-stopped {package} (user {user}).")
+        } else {
+            format!(
+                "Force-stop requested for {package} (user {user}), surviving pids: {pids_after:?}."
+            )
+        },
+        json!({
+            "action": "stop",
+            "target": package,
+            "user": user,
+            "pids_before": pids_before,
+            "pids_after": pids_after,
+            "verified": verified,
+        }),
+    );
     Ok(json!({
         "package": package,
         "user": user,
         "pids_before": pids_before,
         "pids_after": pids_after,
-        "verified": pids_after.is_empty(),
+        "verified": verified,
         "already_stopped": false,
     }))
 }
@@ -249,6 +297,25 @@ pub fn oom(fs: &Sysfs, data_dir: &Path, target: &Target, adjustment: i64) -> Res
     let mut failure: Option<Error> = None;
     let mut applied_count = 0;
     for target in &resolved {
+        if !still_same_process(fs, &target.info) {
+            if failure.is_none() {
+                failure = Some(
+                    Error::invalid_arg(format!(
+                        "process {} ({}) exited or PID was reused",
+                        target.info.pid, target.info.name
+                    ))
+                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
+                );
+            }
+            targets.push(json!({
+                "pid": target.info.pid,
+                "before": target.info.oom_score_adj,
+                "applied": Value::Null,
+                "verified": false,
+                "error": "process exited or PID was reused",
+            }));
+            continue;
+        }
         let path = format!("/proc/{}/oom_score_adj", target.info.pid);
         let result = fs.write_str(&path, &adjustment.to_string());
         let (applied, error) = match result {
@@ -283,6 +350,7 @@ pub fn oom(fs: &Sysfs, data_dir: &Path, target: &Target, adjustment: i64) -> Res
         return Err(failure.unwrap_or_else(|| Error::io("no oom_score_adj write succeeded")));
     }
 
+    let all_verified = applied_count == resolved.len();
     log_action(
         data_dir,
         format!(
@@ -290,6 +358,24 @@ pub fn oom(fs: &Sysfs, data_dir: &Path, target: &Target, adjustment: i64) -> Res
             target.text(),
             resolved.len()
         ),
+    );
+    emit_process_event(
+        data_dir,
+        if all_verified { "info" } else { "warning" },
+        "Process OOM adjustment updated",
+        format!(
+            "Set oom_score_adj={adjustment} for {} ({applied_count}/{} verified).",
+            target.text(),
+            resolved.len()
+        ),
+        json!({
+            "action": "oom",
+            "target": target.text(),
+            "adjustment": adjustment,
+            "applied": adjustment,
+            "verified": all_verified,
+            "pids": resolved.len(),
+        }),
     );
     Ok(json!({
         "target": target.text(),
@@ -337,6 +423,26 @@ pub fn renice(fs: &Sysfs, data_dir: &Path, target: &Target, nice: i64) -> Result
     let mut failure: Option<Error> = None;
     let mut verified_count = 0;
     for target in &resolved {
+        if !still_same_process(fs, &target.info) {
+            if failure.is_none() {
+                failure = Some(
+                    Error::invalid_arg(format!(
+                        "process {} ({}) exited or PID was reused",
+                        target.info.pid, target.info.name
+                    ))
+                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
+                );
+            }
+            targets.push(json!({
+                "pid": target.info.pid,
+                "before": target.info.stat.nice,
+                "applied": Value::Null,
+                "verified": false,
+                "mechanism": "gone",
+                "error": "process exited or PID was reused",
+            }));
+            continue;
+        }
         let before = target.info.stat.nice;
         let mut mechanism = "setpriority";
         if let Err(error) = set_priority(target.info.pid, nice as i32) {
@@ -369,6 +475,7 @@ pub fn renice(fs: &Sysfs, data_dir: &Path, target: &Target, nice: i64) -> Result
         return Err(failure.unwrap_or_else(|| Error::io("no renice succeeded")));
     }
 
+    let all_verified = verified_count == resolved.len();
     log_action(
         data_dir,
         format!(
@@ -377,10 +484,212 @@ pub fn renice(fs: &Sysfs, data_dir: &Path, target: &Target, nice: i64) -> Result
             resolved.len()
         ),
     );
+    emit_process_event(
+        data_dir,
+        if all_verified { "info" } else { "warning" },
+        "Process nice priority updated",
+        format!(
+            "Set nice={nice} for {} ({verified_count}/{} verified).",
+            target.text(),
+            resolved.len()
+        ),
+        json!({
+            "action": "renice",
+            "target": target.text(),
+            "nice": nice,
+            "applied": nice,
+            "verified": all_verified,
+            "pids": resolved.len(),
+        }),
+    );
     Ok(json!({
         "target": target.text(),
         "nice": nice,
         "targets": targets,
+    }))
+}
+
+fn set_scheduler(pid: u32, policy: i32, priority: i32) -> std::io::Result<()> {
+    let param = SchedParam {
+        sched_priority: priority,
+    };
+    // SAFETY: `sched_setscheduler` is a standard Linux syscall taking a PID, scheduling policy
+    // integer, and valid pointer to `SchedParam`.
+    let result = unsafe { sched_setscheduler(pid as i32, policy, &param) };
+    if result == 0 {
+        Ok(())
+    } else {
+        Err(std::io::Error::last_os_error())
+    }
+}
+
+pub fn sched(
+    fs: &Sysfs,
+    data_dir: &Path,
+    target: &Target,
+    policy_name: &str,
+    priority: Option<i64>,
+) -> Result<Value> {
+    let policy = model::parse_sched_policy(policy_name).ok_or_else(|| {
+        Error::invalid_arg(format!(
+            "unknown scheduling policy: {policy_name:?}; expected other|fifo|rr|batch|idle"
+        ))
+    })?;
+    let canonical_name = model::sched_policy_name(policy as u32);
+    let rt_prio = if model::is_realtime_policy(policy) {
+        let p = priority.ok_or_else(|| {
+            Error::invalid_arg(format!("{canonical_name} requires priority within 1..=99"))
+                .with_detail(json!({"range": [1, 99]}))
+        })?;
+        if !(1..=99).contains(&p) {
+            return Err(Error::invalid_arg(format!(
+                "{canonical_name} priority must be within 1..=99"
+            ))
+            .with_detail(json!({"range": [1, 99]})));
+        }
+        p as i32
+    } else {
+        let p = priority.unwrap_or(0);
+        if p != 0 {
+            return Err(
+                Error::invalid_arg(format!("{canonical_name} requires priority 0"))
+                    .with_detail(json!({"range": [0, 0]})),
+            );
+        }
+        0
+    };
+
+    let resolved = resolve(fs, data_dir, target, None)?;
+    if resolved.is_empty() {
+        return Err(Error::invalid_arg(
+            "no running process matches this package",
+        ));
+    }
+    ensure_actionable(&resolved)?;
+
+    let mut targets = Vec::new();
+    let mut failure: Option<Error> = None;
+    let mut write_count = 0usize;
+    let mut verified_count = 0usize;
+
+    for item in &resolved {
+        let before = format!(
+            "{} ({})",
+            model::sched_policy_name(item.info.stat.policy),
+            item.info.stat.rt_priority
+        );
+        if !still_same_process(fs, &item.info) {
+            if failure.is_none() {
+                failure = Some(
+                    Error::invalid_arg(format!(
+                        "process {} ({}) exited or PID was reused",
+                        item.info.pid, item.info.name
+                    ))
+                    .with_detail(json!({"gone": true, "pid": item.info.pid})),
+                );
+            }
+            targets.push(json!({
+                "pid": item.info.pid,
+                "before": before,
+                "applied": Value::Null,
+                "verified": false,
+                "mechanism": "gone",
+                "error": "process exited or PID was reused",
+            }));
+            continue;
+        }
+        match set_scheduler(item.info.pid, policy, rt_prio) {
+            Ok(()) => {
+                write_count += 1;
+                let readback = scan::read_stat(fs, item.info.pid);
+                let verified = readback.as_ref().is_some_and(|stat| {
+                    stat.policy == policy as u32 && stat.rt_priority == rt_prio as u32
+                });
+                if verified {
+                    verified_count += 1;
+                }
+                let applied = readback.as_ref().map(|stat| {
+                    format!(
+                        "{} ({})",
+                        model::sched_policy_name(stat.policy),
+                        stat.rt_priority
+                    )
+                });
+                targets.push(json!({
+                    "pid": item.info.pid,
+                    "before": before,
+                    "applied": applied,
+                    "verified": verified,
+                    "mechanism": "sched_setscheduler",
+                }));
+            }
+            Err(error) => {
+                if failure.is_none() {
+                    let mapped = if matches!(error.raw_os_error(), Some(1 | 13)) {
+                        Error::permission(format!(
+                            "cannot set scheduling policy on pid {}: {error}",
+                            item.info.pid
+                        ))
+                    } else {
+                        Error::io(format!(
+                            "cannot set scheduling policy on pid {}: {error}",
+                            item.info.pid
+                        ))
+                    };
+                    failure = Some(mapped);
+                }
+                targets.push(json!({
+                    "pid": item.info.pid,
+                    "before": before,
+                    "applied": Value::Null,
+                    "verified": false,
+                    "mechanism": "failed",
+                    "error": error.to_string(),
+                }));
+            }
+        }
+    }
+
+    if write_count == 0 {
+        return Err(failure.unwrap_or_else(|| Error::io("no scheduling policy change succeeded")));
+    }
+
+    let all_verified = verified_count == resolved.len();
+    log_action(
+        data_dir,
+        format!(
+            "process sched target={} policy={canonical_name} priority={rt_prio} pids={} verified={verified_count}",
+            target.text(),
+            resolved.len()
+        ),
+    );
+    emit_process_event(
+        data_dir,
+        if all_verified { "info" } else { "warning" },
+        "Process scheduling policy updated",
+        format!(
+            "Set {canonical_name} (priority {rt_prio}) for {} ({verified_count}/{} verified).",
+            target.text(),
+            resolved.len()
+        ),
+        json!({
+            "action": "sched",
+            "target": target.text(),
+            "policy": canonical_name,
+            "policy_id": policy,
+            "priority": rt_prio,
+            "verified": all_verified,
+            "pids": resolved.len(),
+        }),
+    );
+    Ok(json!({
+        "target": target.text(),
+        "policy": canonical_name,
+        "policy_id": policy,
+        "priority": rt_prio,
+        "persisted": false,
+        "targets": targets,
+        "note": "Scheduling policy is one-shot and may be reset by ActivityManager",
     }))
 }
 
@@ -404,8 +713,33 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
     ensure_actionable(&resolved)?;
 
     let mut targets = Vec::new();
+    let mut write_count = 0usize;
     let mut verified_count = 0;
+    let mut failure: Option<Error> = None;
     for target in &resolved {
+        if !still_same_process(fs, &target.info) {
+            if failure.is_none() {
+                failure = Some(
+                    Error::invalid_arg(format!(
+                        "process {} ({}) exited or PID was reused",
+                        target.info.pid, target.info.name
+                    ))
+                    .with_detail(json!({"gone": true, "pid": target.info.pid})),
+                );
+            }
+            targets.push(json!({
+                "pid": target.info.pid,
+                "before": target
+                    .info
+                    .cgroup
+                    .as_ref()
+                    .and_then(model::Cgroup::cpuset_group),
+                "applied": Value::Null,
+                "verified": false,
+                "error": "process exited or PID was reused",
+            }));
+            continue;
+        }
         let before = target
             .info
             .cgroup
@@ -413,9 +747,12 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
             .and_then(model::Cgroup::cpuset_group);
         let write = fs.write_str(&format!("{dir}/tasks"), &target.info.pid.to_string());
         let applied = match write {
-            Ok(()) => scan::read_one(fs, target.info.pid)
-                .and_then(|info| info.cgroup)
-                .and_then(|cgroup| cgroup.cpuset_group()),
+            Ok(()) => {
+                write_count += 1;
+                scan::read_one(fs, target.info.pid)
+                    .and_then(|info| info.cgroup)
+                    .and_then(|cgroup| cgroup.cpuset_group())
+            }
             Err(e) => {
                 return Err(Error::io(format!(
                     "cannot move pid {} to {group}: {e}",
@@ -433,7 +770,11 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
             "verified": applied.as_deref() == Some(group),
         }));
     }
+    if write_count == 0 {
+        return Err(failure.unwrap_or_else(|| Error::io("no cpuset move succeeded")));
+    }
 
+    let all_verified = verified_count == resolved.len();
     log_action(
         data_dir,
         format!(
@@ -441,6 +782,23 @@ pub fn cpuset(fs: &Sysfs, data_dir: &Path, target: &Target, group: &str) -> Resu
             target.text(),
             resolved.len()
         ),
+    );
+    emit_process_event(
+        data_dir,
+        if all_verified { "info" } else { "warning" },
+        "Process cpuset updated",
+        format!(
+            "Moved {} to cpuset {group} ({verified_count}/{} verified).",
+            target.text(),
+            resolved.len()
+        ),
+        json!({
+            "action": "cpuset",
+            "target": target.text(),
+            "group": group,
+            "verified": all_verified,
+            "pids": resolved.len(),
+        }),
     );
     Ok(json!({
         "group": group,
@@ -456,6 +814,16 @@ fn freeze_path(cgroup: Option<&model::Cgroup>) -> Option<String> {
     Some(format!("{base}/cgroup.freeze"))
 }
 
+fn v1_freeze_path(cgroup: Option<&model::Cgroup>) -> Option<String> {
+    let path = cgroup?.freezer.as_deref()?;
+    let trimmed = path.trim_end_matches('/');
+    if trimmed.is_empty() {
+        Some(format!("{V1_FREEZE_ROOT}/freezer.state"))
+    } else {
+        Some(format!("{V1_FREEZE_ROOT}{trimmed}/freezer.state"))
+    }
+}
+
 pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Result<Value> {
     let resolved = resolve(fs, data_dir, target, None)?;
     if resolved.is_empty() {
@@ -469,33 +837,183 @@ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Res
     let use_cgroup = resolved.iter().all(|target| {
         freeze_path(target.info.cgroup.as_ref()).is_some_and(|path| fs.exists(&path))
     });
+    let action_name = if frozen { "freeze" } else { "unfreeze" };
 
     if use_cgroup {
         let mut targets = Vec::new();
+        let mut write_count = 0usize;
+        let mut verified_count = 0usize;
+        let mut failure: Option<Error> = None;
         for target in &resolved {
+            if !still_same_process(fs, &target.info) {
+                if failure.is_none() {
+                    failure = Some(
+                        Error::invalid_arg(format!(
+                            "process {} ({}) exited or PID was reused",
+                            target.info.pid, target.info.name
+                        ))
+                        .with_detail(json!({"gone": true, "pid": target.info.pid})),
+                    );
+                }
+                targets.push(json!({
+                    "pid": target.info.pid,
+                    "before": Value::Null,
+                    "applied": Value::Null,
+                    "verified": false,
+                    "error": "process exited or PID was reused",
+                }));
+                continue;
+            }
             let path = freeze_path(target.info.cgroup.as_ref()).expect("checked above");
             let before = fs.read_str(&path).ok();
             fs.write_str(&path, value)?;
+            write_count += 1;
             let applied = fs.read_str(&path).ok();
+            let verified = applied.as_deref() == Some(value);
+            if verified {
+                verified_count += 1;
+            }
             targets.push(json!({
                 "pid": target.info.pid,
                 "before": before,
                 "applied": applied,
-                "verified": applied.as_deref() == Some(value),
+                "verified": verified,
             }));
         }
+        if write_count == 0 {
+            return Err(failure.unwrap_or_else(|| Error::io("no cgroup freeze write succeeded")));
+        }
+        let all_verified = verified_count == resolved.len();
         log_action(
             data_dir,
             format!(
-                "process {} target={} mechanism=cgroup-v2 pids={}",
-                if frozen { "freeze" } else { "unfreeze" },
+                "process {action_name} target={} mechanism=cgroup-v2 pids={}",
                 target.text(),
                 resolved.len()
             ),
         );
+        emit_process_event(
+            data_dir,
+            if all_verified { "info" } else { "warning" },
+            if frozen {
+                "Process frozen"
+            } else {
+                "Process unfrozen"
+            },
+            format!(
+                "{} {} via cgroup-v2 ({verified_count}/{} verified).",
+                if frozen { "Frozen" } else { "Unfroze" },
+                target.text(),
+                resolved.len()
+            ),
+            json!({
+                "action": action_name,
+                "target": target.text(),
+                "frozen": frozen,
+                "mechanism": "cgroup-v2",
+                "verified": all_verified,
+                "pids": resolved.len(),
+            }),
+        );
         return Ok(json!({
             "frozen": frozen,
             "mechanism": "cgroup-v2",
+            "targets": targets,
+        }));
+    }
+
+    let use_cgroup_v1 = resolved.iter().all(|target| {
+        v1_freeze_path(target.info.cgroup.as_ref()).is_some_and(|path| fs.exists(&path))
+    });
+    if use_cgroup_v1 {
+        let v1_value = if frozen { "FROZEN" } else { "THAWED" };
+        let mut targets = Vec::new();
+        let mut write_count = 0usize;
+        let mut verified_count = 0usize;
+        let mut failure: Option<Error> = None;
+        for target in &resolved {
+            if !still_same_process(fs, &target.info) {
+                if failure.is_none() {
+                    failure = Some(
+                        Error::invalid_arg(format!(
+                            "process {} ({}) exited or PID was reused",
+                            target.info.pid, target.info.name
+                        ))
+                        .with_detail(json!({"gone": true, "pid": target.info.pid})),
+                    );
+                }
+                targets.push(json!({
+                    "pid": target.info.pid,
+                    "before": Value::Null,
+                    "applied": Value::Null,
+                    "verified": false,
+                    "error": "process exited or PID was reused",
+                }));
+                continue;
+            }
+            let path = v1_freeze_path(target.info.cgroup.as_ref()).expect("checked above");
+            let before = fs.read_str(&path).ok();
+            fs.write_str(&path, v1_value)?;
+            write_count += 1;
+            let applied = fs.read_str(&path).ok();
+            let verified = applied.as_deref().is_some_and(|state| {
+                let upper = state.trim().to_ascii_uppercase();
+                if frozen {
+                    upper == "FROZEN" || upper == "FREEZING"
+                } else {
+                    upper == "THAWED"
+                }
+            });
+            if verified {
+                verified_count += 1;
+            }
+            targets.push(json!({
+                "pid": target.info.pid,
+                "before": before,
+                "applied": applied,
+                "verified": verified,
+            }));
+        }
+        if write_count == 0 {
+            return Err(
+                failure.unwrap_or_else(|| Error::io("no cgroup-v1 freezer write succeeded"))
+            );
+        }
+        let all_verified = verified_count == resolved.len();
+        log_action(
+            data_dir,
+            format!(
+                "process {action_name} target={} mechanism=cgroup-v1 pids={}",
+                target.text(),
+                resolved.len()
+            ),
+        );
+        emit_process_event(
+            data_dir,
+            if all_verified { "info" } else { "warning" },
+            if frozen {
+                "Process frozen"
+            } else {
+                "Process unfrozen"
+            },
+            format!(
+                "{} {} via cgroup-v1 ({verified_count}/{} verified).",
+                if frozen { "Frozen" } else { "Unfroze" },
+                target.text(),
+                resolved.len()
+            ),
+            json!({
+                "action": action_name,
+                "target": target.text(),
+                "frozen": frozen,
+                "mechanism": "cgroup-v1",
+                "verified": all_verified,
+                "pids": resolved.len(),
+            }),
+        );
+        return Ok(json!({
+            "frozen": frozen,
+            "mechanism": "cgroup-v1",
             "targets": targets,
         }));
     }
@@ -509,17 +1027,27 @@ pub fn freeze(fs: &Sysfs, data_dir: &Path, target: &Target, frozen: bool) -> Res
             .and_then(|target| target.package.clone())
             .ok_or_else(|| Error::unsupported("cannot resolve a package for this process"))?,
     };
-    command::run(
-        "am",
-        &[if frozen { "freeze" } else { "unfreeze" }, &package],
-        AM_TIMEOUT,
-    )?;
+    command::run("am", &[action_name, &package], AM_TIMEOUT)?;
     log_action(
         data_dir,
-        format!(
-            "process {} package={package} mechanism=am",
-            if frozen { "freeze" } else { "unfreeze" }
-        ),
+        format!("process {action_name} package={package} mechanism=am"),
+    );
+    emit_process_event(
+        data_dir,
+        "info",
+        if frozen {
+            "Process freeze requested"
+        } else {
+            "Process unfreeze requested"
+        },
+        format!("Requested {action_name} for {package} via am."),
+        json!({
+            "action": action_name,
+            "target": package,
+            "frozen": frozen,
+            "mechanism": "am",
+            "verified": Value::Null,
+        }),
     );
     Ok(json!({
         "frozen": frozen,
@@ -725,11 +1253,76 @@ mod tests {
     }
 
     #[test]
+    fn freeze_supports_cgroup_v1_dev_freezer() {
+        let (root, data) = app_fixture("freeze-v1");
+        write(
+            &root,
+            "proc/10123/cgroup",
+            "5:freezer:/uid_10123\n4:cpuset:/top-app\n",
+        );
+        write(&root, "dev/freezer/uid_10123/freezer.state", "THAWED\n");
+        let fs = Sysfs::new(&root);
+        let out = freeze(&fs, &data, &Target::Pid(10123), true).unwrap();
+        assert_eq!(out["mechanism"], "cgroup-v1");
+        assert_eq!(out["targets"][0]["before"], "THAWED");
+        assert_eq!(out["targets"][0]["applied"], "FROZEN");
+        assert_eq!(out["targets"][0]["verified"], true);
+        assert_eq!(
+            std::fs::read_to_string(root.join("dev/freezer/uid_10123/freezer.state")).unwrap(),
+            "FROZEN"
+        );
+    }
+
+    #[test]
     fn renice_rejects_out_of_range_values() {
         let (root, data) = app_fixture("renice-range");
         let fs = Sysfs::new(&root);
         let error = renice(&fs, &data, &Target::Pid(10123), 99).unwrap_err();
         assert_eq!(error.code.as_str(), "invalid_arg");
         assert_eq!(error.detail.unwrap()["range"], json!([-20, 19]));
+    }
+
+    #[test]
+    fn sched_validates_policy_priority_and_protection() {
+        let (root, data) = app_fixture("sched-validate");
+        let fs = Sysfs::new(&root);
+
+        let bad_policy = sched(&fs, &data, &Target::Pid(10123), "deadline", None).unwrap_err();
+        assert_eq!(bad_policy.code.as_str(), "invalid_arg");
+
+        let missing_prio = sched(&fs, &data, &Target::Pid(10123), "fifo", None).unwrap_err();
+        assert_eq!(missing_prio.code.as_str(), "invalid_arg");
+        assert_eq!(missing_prio.detail.unwrap()["range"], json!([1, 99]));
+
+        let bad_rt_prio = sched(&fs, &data, &Target::Pid(10123), "rr", Some(100)).unwrap_err();
+        assert_eq!(bad_rt_prio.code.as_str(), "invalid_arg");
+
+        let bad_other_prio = sched(&fs, &data, &Target::Pid(10123), "other", Some(10)).unwrap_err();
+        assert_eq!(bad_other_prio.code.as_str(), "invalid_arg");
+        assert_eq!(bad_other_prio.detail.unwrap()["range"], json!([0, 0]));
+
+        add_process(&root, 1, "init", 0);
+        let protected = sched(&fs, &data, &Target::Pid(1), "fifo", Some(10)).unwrap_err();
+        assert_eq!(protected.detail.unwrap()["protected"], true);
+    }
+
+    #[test]
+    fn actions_emit_structured_process_events() {
+        let (root, data) = app_fixture("events");
+        let fs = Sysfs::new(&root);
+        oom(&fs, &data, &Target::Pid(10123), 300).unwrap();
+        let store = EventStore::new(&data);
+        let events = store
+            .list(sysflow_core::event::EventFilter {
+                limit: 10,
+                module: Some("process"),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "process_action");
+        assert_eq!(events[0].category, "action");
+        assert_eq!(events[0].metadata["action"], "oom");
+        assert_eq!(events[0].metadata["applied"], 300);
     }
 }

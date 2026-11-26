@@ -2,10 +2,13 @@
 
 package io.sysflow.feature.process
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.asPaddingValues
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +18,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Info
 import androidx.compose.material.icons.rounded.Speed
@@ -24,7 +29,10 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.HorizontalFloatingToolbar
 import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialShapes
 import androidx.compose.material3.MaterialTheme
@@ -58,8 +66,8 @@ import org.koin.androidx.compose.koinViewModel
  *
  * The page owns the polling loop (2 s while STARTED) and passes a 300 ms sampling window, so the
  * CPU number is fresh without the page feeling heavy. Every action is one-shot: the module never
- * persists OOM/nice/cpuset state, and ActivityManager is free to reset it afterwards — the UI says
- * so where it matters instead of pretending otherwise.
+ * persists OOM/nice/sched/cpuset state, and ActivityManager is free to reset it afterwards — the UI
+ * says so where it matters instead of pretending otherwise.
  *
  * `SysFlowApp` wraps this route in `FlexibleSubPage`, so no heading is drawn here.
  */
@@ -70,20 +78,23 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
     val bottomInset = WindowInsets.navigationBars.asPaddingValues().calculateBottomPadding()
     var confirm by remember { mutableStateOf<ProcessConfirm?>(null) }
 
-    // Only while the page is visible; a running action pauses the poll so the list does not jump
-    // under the user's finger.
+    val sheetOpen = state.detailLoading || state.detail != null
+    BackHandler(enabled = state.selectionMode && !sheetOpen) { viewModel.clearSelection() }
+
+    // Only while the page is visible; a running action or multi-select pauses the poll so the list
+    // does not jump under the user's finger.
     LaunchedEffect(Unit) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
             while (isActive) {
                 delay(2_000)
-                if (viewModel.state.value.actionRunning == null) {
+                val current = viewModel.state.value
+                if (current.actionRunning == null && !current.selectionMode) {
                     viewModel.refresh(silent = true)
                 }
             }
         }
     }
 
-    val sheetOpen = state.detailLoading || state.detail != null
     val list = state.list
 
     Column(Modifier.fillMaxSize()) {
@@ -132,8 +143,71 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
                     onFilter = viewModel::setFilter,
                     onSort = viewModel::setSort,
                     onToggleExperimental = viewModel::toggleExperimental,
+                    onLoadMore = viewModel::loadMore,
+                    onToggleSelectionMode = viewModel::toggleSelectionMode,
+                    onEnterSelection = viewModel::enterSelectionWith,
+                    onToggleSelected = viewModel::toggleSelected,
                     onOpen = viewModel::loadDetail,
                 )
+            }
+            if (state.selectionMode && list != null) {
+                val selectedEntries = list.entries.filter { it.pid in state.selectedPids }
+                val packageCount = selectedEntries.mapNotNull { it.packageName }.distinct().size
+                val canBatchStop = "stop" in state.features && packageCount > 0
+                val canBatchFreeze = state.experimental && "freeze" in state.features && selectedEntries.isNotEmpty()
+                HorizontalFloatingToolbar(
+                    expanded = true,
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = 16.dp + bottomInset),
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text(
+                            "已选 ${state.selectedPids.size}",
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.padding(horizontal = 8.dp),
+                            maxLines = 1,
+                        )
+                        if (canBatchStop) {
+                            FilledTonalButton(
+                                onClick = {
+                                    confirm = batchStopConfirm(packageCount) { viewModel.batchStop() }
+                                },
+                                enabled = state.actionRunning == null,
+                                shapes = ButtonDefaults.shapes(),
+                                contentPadding = ButtonDefaults.ExtraSmallContentPadding,
+                            ) { Text("强停", maxLines = 1) }
+                        }
+                        if (canBatchFreeze) {
+                            FilledTonalButton(
+                                onClick = {
+                                    confirm = batchFreezeConfirm(selectedEntries.size, true) {
+                                        viewModel.batchFreeze(true)
+                                    }
+                                },
+                                enabled = state.actionRunning == null,
+                                shapes = ButtonDefaults.shapes(),
+                                contentPadding = ButtonDefaults.ExtraSmallContentPadding,
+                            ) { Text("冻结", maxLines = 1) }
+                            FilledTonalButton(
+                                onClick = {
+                                    confirm = batchFreezeConfirm(selectedEntries.size, false) {
+                                        viewModel.batchFreeze(false)
+                                    }
+                                },
+                                enabled = state.actionRunning == null,
+                                shapes = ButtonDefaults.shapes(),
+                                contentPadding = ButtonDefaults.ExtraSmallContentPadding,
+                            ) { Text("解冻", maxLines = 1) }
+                        }
+                        IconButton(onClick = viewModel::clearSelection) {
+                            Icon(Icons.Rounded.Close, contentDescription = "退出多选")
+                        }
+                    }
+                }
             }
         }
     }
@@ -143,10 +217,15 @@ fun ProcessScreen(viewModel: ProcessViewModel = koinViewModel()) {
             state = state,
             onDismiss = viewModel::dismissDetail,
             onDismissMessage = viewModel::dismissMessage,
-            onStop = { target -> confirm = stopConfirm(target) { viewModel.stop(target) } },
+            onStop = { target, user -> confirm = stopConfirm(target) { viewModel.stop(target, user) } },
             onOom = { target, value -> confirm = oomConfirm(target, value) { viewModel.oom(target, value) } },
             onRenice = { target, value ->
                 confirm = reniceConfirm(target, value) { viewModel.renice(target, value) }
+            },
+            onSched = { target, policy, priority ->
+                confirm = schedConfirm(target, policy, priority) {
+                    viewModel.sched(target, policy, priority)
+                }
             },
             onCpuset = { target, group ->
                 confirm = cpusetConfirm(target, group) { viewModel.cpuset(target, group) }
@@ -248,6 +327,20 @@ private fun reniceConfirm(target: String, value: Int, onConfirm: () -> Unit) = P
     onConfirm = onConfirm,
 )
 
+private fun schedConfirm(
+    target: String,
+    policy: String,
+    priority: Int?,
+    onConfirm: () -> Unit,
+) = ProcessConfirm(
+    title = "修改调度策略为 $policy？",
+    text = "$target 的调度策略将设为 $policy${priority?.takeIf { it > 0 }?.let { "（优先级 $it）" } ?: ""}；实时调度可能影响系统响应，ActivityManager 也可能随后重置。",
+    confirmLabel = "应用",
+    icon = Icons.Rounded.Bolt,
+    danger = policy == "fifo" || policy == "rr",
+    onConfirm = onConfirm,
+)
+
 private fun cpusetConfirm(target: String, group: String, onConfirm: () -> Unit) = ProcessConfirm(
     title = "移入 $group？",
     text = "$target 的进程将只使用该 cpuset 允许的核心；ActivityManager 可能随后改回。",
@@ -263,6 +356,24 @@ private fun freezeConfirm(target: String, frozen: Boolean, onConfirm: () -> Unit
     } else {
         "应用恢复运行。"
     },
+    confirmLabel = if (frozen) "冻结" else "解冻",
+    icon = Icons.Rounded.Bedtime,
+    danger = frozen,
+    onConfirm = onConfirm,
+)
+
+private fun batchStopConfirm(packageCount: Int, onConfirm: () -> Unit) = ProcessConfirm(
+    title = "批量强制停止 $packageCount 个应用？",
+    text = "所选应用未保存的数据可能丢失；下次打开时会重新启动。",
+    confirmLabel = "强停",
+    icon = Icons.Rounded.DeleteForever,
+    danger = true,
+    onConfirm = onConfirm,
+)
+
+private fun batchFreezeConfirm(count: Int, frozen: Boolean, onConfirm: () -> Unit) = ProcessConfirm(
+    title = if (frozen) "批量冻结 $count 项？" else "批量解冻 $count 项？",
+    text = if (frozen) "被冻结的进程将停止运行；系统可能随时解冻。" else "所选进程将恢复运行。",
     confirmLabel = if (frozen) "冻结" else "解冻",
     icon = Icons.Rounded.Bedtime,
     danger = frozen,

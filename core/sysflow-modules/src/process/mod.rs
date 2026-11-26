@@ -101,7 +101,7 @@ impl Module for ProcessModule {
         if !self.proc_readable() {
             return Caps::unsupported("/proc/<pid> is not readable");
         }
-        let mut features = vec!["list"];
+        let mut features = vec!["list", "sched"];
         if self.fs.exists("/system/bin/dumpsys") {
             features.push("foreground");
         }
@@ -141,7 +141,7 @@ impl Module for ProcessModule {
     /// instead of pretending a `set` could work.
     fn apply(&self, _req: &Map<String, Value>) -> Result<ApplyResult> {
         Err(Error::invalid_arg(
-            "process is verb-only: use `sysflow process list|get|stop|oom|renice`",
+            "process is verb-only: use `sysflow process list|get|stop|oom|renice|sched|cpuset|freeze|unfreeze`",
         ))
     }
 
@@ -209,6 +209,7 @@ mod tests {
             "stop",
             "renice",
             "oom_score_adj",
+            "sched",
             "cpuset",
             "freeze",
         ] {

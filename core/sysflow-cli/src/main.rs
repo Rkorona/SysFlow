@@ -248,6 +248,7 @@ fn run_module(reg: &Registry, raw: &[String]) -> Result<Value> {
         "stop" if module == "process" => process_actions::stop(reg, rest),
         "oom" if module == "process" => process_actions::oom(reg, rest),
         "renice" if module == "process" => process_actions::renice(reg, rest),
+        "sched" if module == "process" => process_actions::sched(reg, rest),
         "cpuset" if module == "process" => process_actions::cpuset(reg, rest),
         "freeze" if module == "process" => process_actions::freeze(reg, rest, true),
         "unfreeze" if module == "process" => process_actions::freeze(reg, rest, false),

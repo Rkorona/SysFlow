@@ -212,11 +212,20 @@ class SysFlowClient(private val root: RootExecutor) {
             run("process", "renice", target, nice.coerceIn(-20, 19).toString()),
         ).jsonObject
 
+    /** Set scheduling policy (`other|fifo|rr|batch|idle`) and optional RT priority (`1..=99`). */
+    suspend fun processSched(target: String, policy: String, priority: Int? = null): JsonObject {
+        val args = buildList {
+            add("process"); add("sched"); add(target); add(policy)
+            priority?.let { add(it.toString()) }
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
     /** Move every process of the target into an existing `/dev/cpuset/<group>` (experimental). */
     suspend fun processCpuset(target: String, group: String): JsonObject =
         parseEnvelope<JsonObject>(run("process", "cpuset", target, group)).jsonObject
 
-    /** Freeze / unfreeze (experimental; cgroup v2 leaf first, `am freeze` as fallback). */
+    /** Freeze / unfreeze (experimental; cgroup v2/v1 first, `am freeze` as fallback). */
     suspend fun processFreeze(target: String, frozen: Boolean): JsonObject =
         parseEnvelope<JsonObject>(
             run("process", if (frozen) "freeze" else "unfreeze", target),

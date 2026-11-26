@@ -1,8 +1,10 @@
-@file:OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@file:OptIn(ExperimentalMaterial3ExpressiveApi::class, ExperimentalFoundationApi::class)
 
 package io.sysflow.feature.process
 
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +20,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Apps
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Memory
@@ -25,7 +28,11 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Tune
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilledTonalButton
+import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LoadingIndicator
@@ -74,6 +81,10 @@ internal fun ProcessListContent(
     onFilter: (String) -> Unit,
     onSort: (String) -> Unit,
     onToggleExperimental: () -> Unit,
+    onLoadMore: () -> Unit,
+    onToggleSelectionMode: () -> Unit,
+    onEnterSelection: (Int) -> Unit,
+    onToggleSelected: (Int) -> Unit,
     onOpen: (Int) -> Unit,
 ) {
     val foregroundPackage = list.foreground.packageName
@@ -90,7 +101,7 @@ internal fun ProcessListContent(
             start = 16.dp,
             end = 16.dp,
             top = 8.dp,
-            bottom = 24.dp + bottomInset,
+            bottom = (if (state.selectionMode) 104.dp else 24.dp) + bottomInset,
         ),
         verticalArrangement = Arrangement.spacedBy(4.dp),
     ) {
@@ -146,7 +157,29 @@ internal fun ProcessListContent(
         item(key = "header") {
             SectionHeader(
                 title = "进程",
-                supporting = "按${sortLabel(state.sort)}排序 · 点按查看详情与操作",
+                supporting = if (state.selectionMode) {
+                    "点按勾选要批量处理的进程（受保护进程不可选）"
+                } else {
+                    "按${sortLabel(state.sort)}排序 · 点按查看详情，长按多选"
+                },
+                action = {
+                    FilterChip(
+                        selected = state.selectionMode,
+                        onClick = onToggleSelectionMode,
+                        label = { Text(if (state.selectionMode) "完成" else "多选") },
+                        leadingIcon = if (state.selectionMode) {
+                            {
+                                Icon(
+                                    Icons.Rounded.Check,
+                                    contentDescription = null,
+                                    modifier = Modifier.size(16.dp),
+                                )
+                            }
+                        } else {
+                            null
+                        },
+                    )
+                },
                 modifier = Modifier.padding(bottom = 8.dp),
             )
         }
@@ -172,21 +205,38 @@ internal fun ProcessListContent(
                 icon = entry.packageName?.let { identities[it]?.icon },
                 shape = segmentedShape(index, list.entries.size),
                 usage = usageFraction(entry, state.sort, maxCpu, maxRss),
+                selectionMode = state.selectionMode,
+                selected = entry.pid in state.selectedPids,
+                onLongClick = { onEnterSelection(entry.pid) },
+                onToggleSelect = { onToggleSelected(entry.pid) },
                 onClick = { onOpen(entry.pid) },
                 modifier = Modifier.animateItem(),
             )
         }
 
         item(key = "footer") {
-            NoteTile(
-                text = buildString {
-                    append("共 ${list.total} 个进程")
-                    if (list.truncated) append("，仅显示前 ${list.returned} 个")
-                    if (list.skipped > 0) append("，${list.skipped} 个进程读取失败")
-                    append(" · 采样 ${list.sampleMs} ms")
-                },
+            Column(
                 modifier = Modifier.padding(top = 8.dp),
-            )
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                if (list.truncated && state.limit < ProcessViewModel.MAX_LIMIT) {
+                    FilledTonalButton(
+                        onClick = onLoadMore,
+                        shapes = ButtonDefaults.shapes(),
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text("加载更多（当前 ${list.returned} / ${list.total}）")
+                    }
+                }
+                NoteTile(
+                    text = buildString {
+                        append("共 ${list.total} 个进程")
+                        if (list.truncated) append("，当前显示前 ${list.returned} 个")
+                        if (list.skipped > 0) append("，${list.skipped} 个进程读取失败")
+                        append(" · 采样 ${list.sampleMs} ms")
+                    },
+                )
+            }
         }
     }
 }
@@ -196,7 +246,7 @@ internal fun ProcessListContent(
 /**
  * Size of the picture: how many processes, what the listed ones add up to, and who is in front.
  *
- * The sums cover the rows the module returned (at most [ProcessViewModel.LIST_LIMIT]), and say so —
+ * The sums cover the rows the module returned (at most [ProcessViewModel.MAX_LIMIT]), and say so —
  * CPU is per core, so it can pass 100%, and RSS counts shared pages once per process.
  */
 @Composable
@@ -402,7 +452,7 @@ private fun ProcessSearchField(
     )
 }
 
-/** Opt-in switch for the one-shot actions that can hurt: OOM adjust, cpuset, freeze. */
+/** Opt-in switch for the one-shot actions that can hurt: OOM adjust, RT sched, cpuset, freeze. */
 @Composable
 private fun ExperimentalTile(
     enabled: Boolean,
@@ -413,7 +463,9 @@ private fun ExperimentalTile(
     val scheme = MaterialTheme.colorScheme
     val container = if (enabled) scheme.tertiaryContainer else scheme.surfaceContainerHigh
     val content = if (enabled) scheme.onTertiaryContainer else scheme.onSurface
-    val available = features.any { it == "oom_score_adj" || it == "cpuset" || it == "freeze" }
+    val available = features.any {
+        it == "oom_score_adj" || it == "sched" || it == "cpuset" || it == "freeze"
+    }
 
     Surface(
         onClick = onToggle,
@@ -445,7 +497,7 @@ private fun ExperimentalTile(
                 Text("实验功能", style = MaterialTheme.typography.titleMediumEmphasized)
                 Text(
                     buildString {
-                        append("OOM 调节、cpuset 绑核、冻结")
+                        append("OOM 调节、实时调度、cpuset 绑核、冻结")
                         if (!available) append("（本机不可用）")
                     },
                     style = MaterialTheme.typography.bodySmall,
@@ -465,18 +517,43 @@ private fun ProcessRow(
     icon: ImageBitmap?,
     shape: Shape,
     usage: Float,
+    selectionMode: Boolean,
+    selected: Boolean,
+    onLongClick: () -> Unit,
+    onToggleSelect: () -> Unit,
     onClick: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
     val scheme = MaterialTheme.colorScheme
     val accent = MaterialTheme.sysFlowColors.containerAccent
-    val container = if (entry.foreground) scheme.primaryContainer else scheme.surfaceContainerHigh
-    val content = if (entry.foreground) scheme.onPrimaryContainer else scheme.onSurface
+    val container = when {
+        selected -> scheme.secondaryContainer
+        entry.foreground -> scheme.primaryContainer
+        else -> scheme.surfaceContainerHigh
+    }
+    val content = when {
+        selected -> scheme.onSecondaryContainer
+        entry.foreground -> scheme.onPrimaryContainer
+        else -> scheme.onSurface
+    }
     val secondary = content.copy(alpha = 0.75f)
 
     Surface(
-        onClick = onClick,
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier
+            .fillMaxWidth()
+            .clip(shape)
+            .combinedClickable(
+                onClick = {
+                    if (selectionMode) {
+                        if (!entry.protected) onToggleSelect()
+                    } else {
+                        onClick()
+                    }
+                },
+                onLongClick = {
+                    if (!selectionMode && !entry.protected) onLongClick()
+                },
+            ),
         shape = shape,
         color = container,
         contentColor = content,
@@ -486,6 +563,13 @@ private fun ProcessRow(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(14.dp),
         ) {
+            if (selectionMode) {
+                Checkbox(
+                    checked = selected,
+                    onCheckedChange = null,
+                    enabled = !entry.protected,
+                )
+            }
             AppIcon(icon = icon, size = 48.dp, highlight = entry.foreground)
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 Row(
@@ -504,6 +588,13 @@ private fun ProcessRow(
                             text = "前台",
                             container = scheme.onPrimaryContainer,
                             content = scheme.primaryContainer,
+                        )
+                    }
+                    if (entry.frozen == true) {
+                        InfoPill(
+                            text = "已冻结",
+                            container = scheme.tertiaryContainer,
+                            content = scheme.onTertiaryContainer,
                         )
                     }
                     if (entry.protected) {

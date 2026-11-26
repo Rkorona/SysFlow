@@ -30,17 +30,21 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
         val sort: String = "cpu",
         val filter: String = "all",
         val query: String = "",
+        val limit: Int = DEFAULT_LIMIT,
         /** A user-initiated refresh uses a longer sampling window than the 2 s poll. */
         val refreshing: Boolean = false,
         /** Human label of the action in flight, or `null`. */
         val actionRunning: String? = null,
         val message: String? = null,
         val error: String? = null,
-        /** Experimental actions (OOM / cpuset / freeze) stay hidden until explicitly enabled. */
+        /** Experimental actions (OOM / sched / cpuset / freeze) stay hidden until explicitly enabled. */
         val experimental: Boolean = false,
+        val selectionMode: Boolean = false,
+        val selectedPids: Set<Int> = emptySet(),
     ) {
         val hasExperimental: Boolean
-            get() = "oom_score_adj" in features || "cpuset" in features || "freeze" in features
+            get() = "oom_score_adj" in features || "sched" in features ||
+                "cpuset" in features || "freeze" in features
     }
 
     private val _state = MutableStateFlow(UiState())
@@ -59,7 +63,7 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
             if (!silent) _state.update { it.copy(refreshing = true) }
             runCatching {
                 client.processList(
-                    limit = LIST_LIMIT,
+                    limit = current.limit.coerceIn(DEFAULT_LIMIT, MAX_LIMIT),
                     sort = current.sort,
                     filter = current.filter,
                     query = current.query.ifBlank { null },
@@ -67,12 +71,19 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
                     foreground = true,
                 )
             }.onSuccess { json ->
+                val parsed = parseProcessList(json)
                 _state.update {
+                    val validPids = parsed.entries.map { entry -> entry.pid }.toSet()
                     it.copy(
                         loading = false,
                         refreshing = false,
-                        list = parseProcessList(json),
+                        list = parsed,
                         error = null,
+                        selectedPids = if (it.selectionMode) {
+                            it.selectedPids.intersect(validPids)
+                        } else {
+                            emptySet()
+                        },
                     )
                 }
             }.onFailure { error ->
@@ -107,7 +118,9 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
     }
 
     fun setQuery(query: String) {
+        val cleared = query.isEmpty() && _state.value.query.isNotEmpty()
         _state.update { it.copy(query = query) }
+        if (cleared) refresh()
     }
 
     fun submitQuery() {
@@ -116,6 +129,41 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
 
     fun toggleExperimental() {
         _state.update { it.copy(experimental = !it.experimental) }
+    }
+
+    fun loadMore() {
+        val nextLimit = (_state.value.limit + LIMIT_STEP).coerceAtMost(MAX_LIMIT)
+        if (nextLimit == _state.value.limit) return
+        _state.update { it.copy(limit = nextLimit) }
+        refresh()
+    }
+
+    fun toggleSelectionMode() {
+        _state.update {
+            val next = !it.selectionMode
+            it.copy(selectionMode = next, selectedPids = emptySet())
+        }
+    }
+
+    fun enterSelectionWith(pid: Int) {
+        val entry = _state.value.list?.entries?.firstOrNull { it.pid == pid } ?: return
+        if (entry.protected) return
+        _state.update { it.copy(selectionMode = true, selectedPids = setOf(pid)) }
+    }
+
+    fun toggleSelected(pid: Int) {
+        val entry = _state.value.list?.entries?.firstOrNull { it.pid == pid } ?: return
+        if (entry.protected) return
+        _state.update { current ->
+            val next = current.selectedPids.toMutableSet().apply {
+                if (!add(pid)) remove(pid)
+            }.toSet()
+            current.copy(selectedPids = next)
+        }
+    }
+
+    fun clearSelection() {
+        _state.update { it.copy(selectionMode = false, selectedPids = emptySet()) }
     }
 
     /**
@@ -183,6 +231,16 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
         if (failed == 0) "$target 的 nice 已设为 $nice" else "$failed 个进程未能调整 nice"
     }
 
+    fun sched(target: String, policy: String, priority: Int?) =
+        runAction("调整 $target 的调度策略") {
+            val result = parseProcessAction(client.processSched(target, policy, priority))
+            val failed = result.targets.count { it.verified == false }
+            val label = result.policy ?: policy
+            val prio = result.priority?.takeIf { it > 0 }?.let { "（优先级 $it）" }.orEmpty()
+            if (failed == 0) "$target 的调度策略已设为 $label$prio"
+            else "$failed 个进程未能应用调度策略"
+        }
+
     fun cpuset(target: String, group: String) = runAction("把 $target 移入 $group") {
         val result = parseProcessAction(client.processCpuset(target, group))
         val moved = result.targets.count { it.verified == true }
@@ -199,6 +257,95 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
             "$verb $target 已提交（am 路径只能看退出码，未逐进程读回）"
         } else {
             "$verb $target 完成"
+        }
+    }
+
+    fun batchStop() {
+        val stateNow = _state.value
+        val targets = stateNow.list?.entries.orEmpty()
+            .filter { it.pid in stateNow.selectedPids && !it.protected && it.packageName != null }
+            .mapNotNull { entry -> entry.packageName?.let { it to entry.user } }
+            .distinct()
+        if (targets.isEmpty()) return
+        viewModelScope.launch {
+            _state.update {
+                it.copy(actionRunning = "批量强停 ${targets.size} 个应用", message = null, error = null)
+            }
+            var stopped = 0
+            var skipped = 0
+            var failed = 0
+            var lastError: String? = null
+            for ((pkg, user) in targets) {
+                runCatching { parseProcessAction(client.processStop(pkg, user)) }
+                    .onSuccess { res ->
+                        when {
+                            res.alreadyStopped -> skipped += 1
+                            res.verified == true -> stopped += 1
+                            else -> failed += 1
+                        }
+                    }
+                    .onFailure { err ->
+                        failed += 1
+                        lastError = err.message
+                    }
+            }
+            val summary = buildString {
+                append("批量强停完成：已停止 $stopped 个")
+                if (skipped > 0) append("，已不在运行 $skipped 个")
+                if (failed > 0) append("，未确认或失败 $failed 个")
+                if (lastError != null && failed > 0) append("（$lastError）")
+            }
+            _state.update {
+                it.copy(
+                    actionRunning = null,
+                    selectionMode = false,
+                    selectedPids = emptySet(),
+                    message = if (failed == 0) summary else null,
+                    error = if (failed > 0) summary else null,
+                )
+            }
+            refresh(silent = true)
+        }
+    }
+
+    fun batchFreeze(frozen: Boolean) {
+        val stateNow = _state.value
+        val targets = stateNow.list?.entries.orEmpty()
+            .filter { it.pid in stateNow.selectedPids && !it.protected }
+            .map { entry -> entry.packageName ?: entry.pid.toString() }
+            .distinct()
+        if (targets.isEmpty()) return
+        val verb = if (frozen) "冻结" else "解冻"
+        viewModelScope.launch {
+            _state.update {
+                it.copy(actionRunning = "批量${verb} ${targets.size} 项", message = null, error = null)
+            }
+            var ok = 0
+            var failed = 0
+            var lastError: String? = null
+            for (target in targets) {
+                runCatching { client.processFreeze(target, frozen) }
+                    .onSuccess { ok += 1 }
+                    .onFailure { err ->
+                        failed += 1
+                        lastError = err.message
+                    }
+            }
+            val summary = buildString {
+                append("批量${verb}完成：成功 $ok 项")
+                if (failed > 0) append("，失败 $failed 项")
+                if (lastError != null && failed > 0) append("（$lastError）")
+            }
+            _state.update {
+                it.copy(
+                    actionRunning = null,
+                    selectionMode = false,
+                    selectedPids = emptySet(),
+                    message = if (failed == 0) summary else null,
+                    error = if (failed > 0) summary else null,
+                )
+            }
+            refresh(silent = true)
         }
     }
 
@@ -228,7 +375,9 @@ class ProcessViewModel(private val client: SysFlowClient) : ViewModel() {
     }
 
     companion object {
-        const val LIST_LIMIT = 80
+        const val DEFAULT_LIMIT = 80
+        const val LIMIT_STEP = 60
+        const val MAX_LIMIT = 200
         const val POLL_SAMPLE_MS = 300
         const val REFRESH_SAMPLE_MS = 800
     }

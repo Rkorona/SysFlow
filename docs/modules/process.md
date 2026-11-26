@@ -1,13 +1,20 @@
 # Process module: paths, items and device notes
 
-Implementation: `core/sysflow-modules/src/process/` (planned: `mod.rs`, `scan.rs`, `foreground.rs`,
-`actions.rs`, `tests.rs`). Protocol: `docs/protocol.md` §3.25. Plan and decisions:
+Implementation: `core/sysflow-modules/src/process/` (`mod.rs`, `model.rs`, `scan.rs`, `foreground.rs`,
+`packages.rs`, `actions.rs`). Protocol: `docs/protocol.md` §3.25. Plan and decisions:
 `docs/process-module-plan.md`.
 
-> **Status: Steps 1–6 implemented and verified on the S25 (v0.2.3, 2026-11-26).** `oom`, `renice`,
-> `cpuset`, `freeze`/`unfreeze` and `stop` all worked and read back correctly, the protection gate
-> rejected `com.android.systemui`, and the M3E APK page was built and ran successfully. Remaining
-> items are the optional cross-checks under **Device checklist**.
+> **Status: Steps 0–6 implemented and verified on the S25 (v0.2.3, 2026-11-26).** `oom`, `renice`,
+> `sched`, `cpuset`, `freeze`/`unfreeze` and `stop` all worked and read back correctly, the protection
+> gate rejected `com.android.systemui`, frozen status is extracted from cgroup v2/v1, structured
+> `process_action` audit events are emitted, and the M3E APK page supports custom numeric input and
+> batch operations. Remaining items are the optional cross-checks under **Device checklist**.
+>
+> **Integration note (2026-11-26):** this revision restores the `sched` verb, the structured
+> `process_action` events, the cgroup-v1 freezer path and the batch/detail UI from the AI Studio
+> session snapshot in `tmp/`. The Rust paths are covered by `cargo test`; the `sched`, event and
+> batch-UI entries in the device checklist come from that session's record and were **not re-run**
+> after this merge — re-check them on the next flashed build before treating them as confirmed.
 
 This document is updated at the end of **every** step with the measured value or the reason a path
 was dropped. The read-only half is safe (no writes); the action half is one-shot and never touches
@@ -26,17 +33,19 @@ Reference device for earlier steps: Samsung S25 (same device as `docs/modules/me
 | process name | `/proc/<pid>/cmdline` (NUL-separated) | `status` `Name:` → `pid N` | app processes carry the package name in `cmdline[0]`; `kthreadd` is empty |
 | oom_score_adj | `/proc/<pid>/oom_score_adj` | field omitted | present for every sampled pid: init `-1000`, background wallpaper `100`, apps `0..100` |
 | cgroup (v1 controllers + v2 unified) | `/proc/<pid>/cgroup` | `cgroup` / `cpuset` omitted | v1: `freezer/cpuset/cpuacct/cpu/blkio`; v2: `0::/apps/uid_10157/pid_12225` for apps, `0::/` for init |
+| frozen state | cgroup v2 `cgroup.freeze` / `cgroup.events`, or v1 `/dev/freezer/<path>/freezer.state` | `frozen` omitted | read directly during `list` / `get` (`true`/`false`) |
 | PSS / SwapPss (detail only) | `/proc/<pid>/smaps_rollup` | `pss_kb` / `swap_pss_kb` omitted | not probed yet (Step 2 detail path) |
-| UID → package | `/data/system/packages.list` → `cmd package list packages -U` | `package:null`, label falls back to AID / `UID <n>` | **readable**, **698** lines, **10** columns; first line `com.google.android.networkstack.tethering 1073 …` |
+| UID → package | `/data/system/packages.list` → `cmd package list packages -U` | `package:null`, label falls back to AID / `UID <n>` | **readable by the module**, **698** lines, **10** columns; first line `com.google.android.networkstack.tethering 1073 …` |
 | foreground activity | `dumpsys activity activities` (`topResumedActivity` → `mResumedActivity`, 3 s timeout) | `foreground.available:false` | `topResumedActivity=ActivityRecord{172310012 u0 com.server.auditor.ssh.client/.ssh.terminal.TerminalActivity t2919}`, parsed package ok, **23 ms** |
 | `CLK_TCK` | `/proc/self/auxv` `AT_CLKTCK` (17) | 100 | `getconf CLK_TCK` = **100** and auxv = **100**, while **`sysconf(2)` returned 2048** — bionic numbering differs from glibc, so sysconf must not be used. The probe now prints all three |
 | page size | not needed (`VmRSS` is kB) | — | `sysconf(30)` returned **1** — another reason to avoid sysconf |
 | cpuset groups | `/dev/cpuset/<dir>/tasks` | `cpuset` not advertised | cgroup **v1**, **13** group dirs with `tasks`, all owner-writable: `top-app 0-7`, `foreground 0-5`, `background 0-1,4-5`, `restricted 0-7`, … |
-| freezer | `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze` → `am freeze` | action hidden | **confirmed**: the `apps/uid_…/pid_…/cgroup.freeze` leaf exists and was written `1`→`0` on 2026-11-26; `/dev/freezer` also exists (v1); `am help` lists `freeze` |
+| freezer | `/sys/fs/cgroup/apps/uid_<uid>/pid_<pid>/cgroup.freeze` → `/dev/freezer/<path>/freezer.state` → `am freeze` | action hidden | **confirmed**: the `apps/uid_…/pid_…/cgroup.freeze` leaf exists and was written `1`→`0` on 2026-11-26; `/dev/freezer` v1 also supported; `am help` lists `freeze` |
 | force-stop | `am force-stop --user <user> <package>` | `unsupported` | `/system/bin/am` present |
 | renice | `setpriority(2)` primary; `renice` fallback | `renice` not advertised | toybox 0.8.13: `usage: renice [-gpu] -n INCREMENT ID...` — **`-n` is an increment**, so the target nice cannot be passed directly |
+| sched | `sched_setscheduler(2)` syscall | `sched` requires `/proc` | sets `SCHED_OTHER/FIFO/RR/BATCH/IDLE` + RT priority `1..=99` and reads back `/proc/<pid>/stat` |
 | `hidepid` visibility | `/proc` mount options / unreadable peers | `skipped` counts; partial list | no restriction as root: 1198/1198 readable |
-| SELinux | `getenforce`, denied reads during scan | `skipped`; `probe` records denials | `Enforcing`; no denied reads during the scan; writes not exercised yet |
+| SELinux | `getenforce`, denied reads during scan | `skipped`; `probe` records denials | `Enforcing`; no denied reads during the scan; write actions verified in su domain |
 
 All `/proc` and `/sys` reads go through `Sysfs::resolve`, so the host test tree
 (`SYSFLOW_SYSFS_ROOT`) keeps `proc/` and `dev/` next to `sys/`.
@@ -50,18 +59,22 @@ All `/proc` and `/sys` reads go through `Sysfs::resolve`, so the host test tree
    glibc constant values.
 3. **The freezer lives under `apps/`.** The unified cgroup path is `/apps/uid_10157/pid_12225`, which
    is why the first probe reported "no freezer" — it only looked under `/sys/fs/cgroup/uid_*`.
-   `am help` does list `freeze`/`unfreeze`, so there are two candidate mechanisms to test.
+   Both cgroup v2 (`cgroup.freeze` / `cgroup.events`) and cgroup v1 (`/dev/freezer`) are supported
+   before falling back to `am freeze`.
 4. **`renice -n` is an increment** (toybox 0.8.13), not an absolute nice. Use `setpriority(2)` for
    "set to value"; only fall back to `renice -n (target − current)`.
-5. **cgroup v1 cpuset is writable**: 13 groups, `tasks` owner-writable. A per-app move is feasible;
+5. **Realtime scheduling via `sched_setscheduler(2)` works.** `SCHED_FIFO` and `SCHED_RR` require
+   priority `1..=99`; non-realtime policies (`SCHED_OTHER`, `SCHED_BATCH`, `SCHED_IDLE`) must pass
+   priority `0`.
+6. **cgroup v1 cpuset is writable**: 13 groups, `tasks` owner-writable. A per-app move is feasible;
    expect AMS to move the process back on its next state change.
-6. **`oom_score_adj` is readable for every pid** (init `-1000`, a cached wallpaper `100`). Writing is
+7. **`oom_score_adj` is readable for every pid** (init `-1000`, a cached wallpaper `100`). Writing is
    the high-risk part and stays behind the experiment gate.
-7. **Foreground** is `topResumedActivity=ActivityRecord{… u0 <pkg>/<activity> …}`; the parser handles
+8. **Foreground** is `topResumedActivity=ActivityRecord{… u0 <pkg>/<activity> …}`; the parser handles
    both this and `mResumedActivity:`.
-8. **`comm` is truncated to 15 chars** (`.wallpaper.live`), so names must come from `cmdline` first.
-9. **SELinux is Enforcing** and `/proc` is fully readable in the su domain; write paths are unverified.
-10. **`packages.list`** is 698 lines / 10 columns, so the `batterystats::read_package_uids` reuse holds.
+9. **`comm` is truncated to 15 chars** (`.wallpaper.live`), so names must come from `cmdline` first.
+10. **SELinux is Enforcing** and `/proc` is fully readable in the su domain; actions succeed.
+11. **`packages.list`** is 698 lines / 10 columns, so the `batterystats::read_package_uids` reuse holds.
 
 ## Running the probe (Step 1)
 
@@ -84,9 +97,9 @@ Required probe output (checked off as it lands):
       `mResumedActivity` variants if present) + parsed package — `topResumedActivity` only, parsed ok
 - [x] `packages.list` readability, line count, column count — 698 lines, 10 columns
 - [x] `/dev/cpuset` group list and `tasks` writability — 13 groups, all owner-writable
-- [x] cgroup v2 freezer path existence; `am help | grep freeze` — `apps/` path to re-probe; `am freeze` exists
+- [x] cgroup v2 freezer path existence; `am help | grep freeze` — `apps/` path confirmed; `am freeze` exists
 - [x] `renice` / `chrt` / `am` presence and version lines — all present; renice is toybox with increment `-n`
-- [x] scan timing for N processes (first pass, second pass, `get`, foreground dumpsys) — 28 ms / (Step 2) / (Step 2) / 23 ms
+- [x] scan timing for N processes (first pass, second pass, `get`, foreground dumpsys) — 28 ms / 300 ms / 250 ms / 23 ms
 
 ## Parsing rules (fixed now, they do not need a device)
 
@@ -102,7 +115,10 @@ Required probe output (checked off as it lands):
   kernel threads.
 - **UID math** — `app_id = uid % 100000`, `user = uid / 100000`; package lookup uses `app_id`.
 - **Identity** — `(pid, starttime)`; a second pass that sees a different `starttime` marks
-  `cpu_pct:null` instead of attributing another process's ticks.
+  `cpu_pct:null` instead of attributing another process's ticks. Before any write action, `starttime`
+  is re-checked to ensure PID reuse does not target the wrong process.
+- **Frozen detection** — Checks cgroup v2 `cgroup.freeze` and `cgroup.events` (`frozen 1` handles
+  parent-inherited freezes), then cgroup v1 `/dev/freezer/<group>/freezer.state` (`FROZEN` / `FREEZING`).
 
 ## Package and process names
 
@@ -138,6 +154,17 @@ Hardcoded in Step 2/3 (`docs/process-module-plan.md`〈保护名单〉): `pid �
 `com.android.server.telecom`, `com.android.bluetooth`, `com.android.nfc`, `android`), and SysFlow
 itself. A package action that expands to any protected PID is rejected as a whole.
 
+## Structured audit events
+
+All executed process actions emit a structured `process_action` event (`category: "action"`) to the
+module-owned journal under `/data/adb/sysflow/events/`:
+- `stop`, `oom`, `renice`, `sched`, `cpuset`, `freeze`, `unfreeze`.
+- Fully verified actions emit severity `info`; actions with unconfirmed or surviving PIDs emit `warning`.
+- `metadata` always contains `action`, `target` and `verified`, plus the action's own fields
+  (`user` / `pids_before` / `pids_after`, `adjustment`, `nice`, `policy` / `priority`, `group`,
+  `frozen` / `mechanism`); `applied` and `pids` appear where applicable.
+- APK reads and formats these records in the "系统事件" and "模块动态" screens.
+
 ## Device checklist (Step 6)
 
 Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
@@ -148,6 +175,8 @@ Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
   SELinux denial (the toybox fallback was not needed). Note: verifying with
   `awk '{print $19}'` inside a double-quoted `su -c` string is misleading — the outer shell expands
   `$19` to `$1` + `9`; use `sed -n 's/.*) //p'` or read the response's `applied` instead.
+- `process sched io.sysflow fifo 10` → `applied:"SCHED_FIFO (10)"`, `verified:true`,
+  `mechanism:"sched_setscheduler"`.
 - `process cpuset io.sysflow top-app` → `verified:true`, and `/proc/<pid>/cgroup` showed
   `4:cpuset:/top-app`. (The process was already in `top-app`, so this proved the write path, not a
   group transition.)
@@ -161,6 +190,9 @@ Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
   `/dev/freezer` exists too.
 - `list --limit 50 --sample-ms 300` took **0.41–0.46 s** wall; `get` **0.25 s**; ~1100 processes
   scanned in 23–28 ms.
+- APK UI: multi-select with `HorizontalFloatingToolbar` for batch force-stop, freeze and unfreeze;
+  custom numeric inputs with sign toggle button (`±`) for `nice` and `oom_score_adj`; custom priority
+  slider for real-time scheduling.
 
 **Still open (optional cross-checks):**
 
@@ -190,19 +222,19 @@ Filled by the step that first sees the condition, with the exact errno / SELinux
 
 | condition | symptom in output | first seen |
 |---|---|---|
-| `/proc` unreadable | `available:false` + `reason` | 待测 |
-| single process unreadable | `skipped++`, others listed | 待测 |
-| `packages.list` unreadable | `package:null`, AID label | 待测 |
-| `dumpsys activity` timeout | `foreground.available:false` | 待测 |
-| `smaps_rollup` denied | `pss_kb` omitted | 待测 |
-| no freezer / cpuset | respective feature absent from `caps.features` | 待测 |
+| `/proc` unreadable | `available:false` + `reason` | unit tests |
+| single process unreadable | `skipped++`, others listed | unit tests |
+| `packages.list` unreadable | `package:null`, AID label | unit tests |
+| `dumpsys activity` timeout | `foreground.available:false` | unit tests |
+| `smaps_rollup` denied | `pss_kb` omitted | unit tests |
+| no freezer / cpuset | respective feature absent from `caps.features` | unit tests |
 
 ## Rollback and safety
 
-- Steps 0–2 are read-only; removing the module registration is a complete rollback.
-- Actions (Steps 3–4) never write `config.json`, so they cannot affect boot, drift or safe mode.
+- Read-only steps change nothing; removing the module registration is a complete rollback.
+- Actions never write `config.json`, so they cannot affect boot, drift or safe mode.
   Rollback = remove the verb branch + registration; a stopped app restarts when opened, an adjusted
-  `oom_score_adj` / nice / cpuset is reset by AMS on the next state change, a frozen process is
+  `oom_score_adj` / nice / sched / cpuset is reset by AMS on the next state change, a frozen process is
   thawed by `unfreeze` or a reboot.
 - No action is allowed on a protected target; verification happens against the **current** process
   state, not the list snapshot the UI is showing.
@@ -210,8 +242,8 @@ Filled by the step that first sees the condition, with the exact errno / SELinux
 ## Host test tree
 
 Implemented as unit tests beside each module (`model.rs`, `scan.rs`, `actions.rs`, `foreground.rs`,
-`packages.rs`) rather than one giant `tests.rs`: a fake root holds
+`packages.rs`): a fake root holds
 `proc/<pid>/{stat,status,cmdline,oom_score_adj,cgroup,smaps_rollup}`,
-`dev/cpuset/<group>/tasks`, `sys/fs/cgroup/apps/.../cgroup.freeze` and
-`data/system/packages.list`. Fixture cases are listed in `docs/process-module-plan.md`〈测试计划〉;
-`cargo test -p sysflow-modules process` is the focused run.
+`dev/cpuset/<group>/tasks`, `sys/fs/cgroup/apps/.../cgroup.freeze`,
+`dev/freezer/.../freezer.state` and `data/system/packages.list`.
+Run tests via `cargo test -p sysflow-modules process`.

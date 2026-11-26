@@ -1040,10 +1040,11 @@ direction the cut fell. Expect a few hundred milliseconds; results are cached 60
 
 ### 3.25 Process module (`process ...`)
 
-> **Status: implemented on the host (Steps 2–4), device acceptance pending.** The read-only verbs,
-> the protection gate and the one-shot actions are covered by host tests against a fake `/proc`; the
-> reference device proved the paths (`docs/modules/process.md`). What is still unverified is the
-> write path on a real device (SELinux / AMS reactions) and the APK page.
+> **Status: implemented and verified on the S25 (v0.2.3, 2026-11-26).** The read-only verbs, the
+> protection gate and the one-shot actions (`stop`, `oom`, `renice`, `sched`, `cpuset`,
+> `freeze`/`unfreeze`) are covered by host tests against a fake `/proc` and were exercised on the
+> device with read-back (`docs/modules/process.md`). Still open there: the optional cross-checks and
+> the `am freeze` fallback (the cgroup leaf exists on the reference device).
 
 The module id is `process` (not `proc`). It is **verb-only**: no schema items, excluded from
 `snapshot` (`in_snapshot == false`), no `apply` / `drift` / boot replay, no history sampling. The
@@ -1068,7 +1069,7 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
      "package":"com.android.settings","name":"com.android.settings",
      "cmdline":"com.android.settings","state":"S","threads":42,
      "rss_kb":182344,"cpu_pct":12.5,"cpu_ticks":63,
-     "oom_score_adj":0,"cgroup":"/uid_10123/pid_8123",
+     "oom_score_adj":0,"frozen":false,"cgroup":"/uid_10123/pid_8123",
      "foreground":true,"system":false,"protected":false,
      "protected_reason":null}
   ]}}
@@ -1098,6 +1099,9 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 - The result is **not cached**; only the foreground lookup (5 s) and the UID→package map (10 min) are.
 - `cpuset_groups` lists the existing `/dev/cpuset/<group>` directories that have a `tasks` node. It is
   the option list for `process cpuset`; when empty, the cpuset action must not be offered.
+- `frozen` is present when a cgroup freezer reports state: v2 `cgroup.freeze` / `cgroup.events`
+  (`frozen 1` covers parent-inherited freezes), else v1 `/dev/freezer/<path>/freezer.state`. It is
+  omitted when neither mechanism exists.
 
 #### `process get <pid>`
 
@@ -1108,8 +1112,8 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
   "name":"com.android.settings","cmdline":["com.android.settings"],
   "state":"S","threads":42,"rss_kb":182344,"pss_kb":96400,"swap_pss_kb":0,
   "cpu_pct":12.5,"cpu_ticks":63,"sample_ms":500,
-  "oom_score_adj":0,"nice":0,"rt_priority":0,"policy":0,
-  "cgroup":"/uid_10123/pid_8123","cpuset":"top-app","start_time_ticks":123456789,
+  "oom_score_adj":0,"nice":0,"rt_priority":0,"policy":0,"policy_name":"SCHED_OTHER",
+  "cgroup":"/uid_10123/pid_8123","cpuset":"top-app","frozen":false,"start_time_ticks":123456789,
   "foreground":true,"system":false,"protected":false,"protected_reason":null,
   "clock_ticks":100}}
 ```
@@ -1117,7 +1121,10 @@ sysflow process list [--limit N] [--sort cpu|rss|name|pid] [--filter all|user|sy
 - `get` accepts a **PID only**; package lookup goes through `list --query`. A process that exits while
   being read returns `invalid_arg` with `detail.gone:true` instead of a half-filled object.
 - `pss_kb` / `swap_pss_kb` come from one `smaps_rollup` read and are omitted when unreadable (the row
-  keeps `rss_kb`). `nice` / `rt_priority` / `policy` are the scheduler fields from `/proc/<pid>/stat`.
+  keeps `rss_kb`). `nice` / `rt_priority` / `policy` are the scheduler fields from `/proc/<pid>/stat`;
+  `policy_name` is the kernel name for `policy` (`SCHED_OTHER` / `SCHED_FIFO` / `SCHED_RR` /
+  `SCHED_BATCH` / `SCHED_IDLE`, `SCHED_DEADLINE` if the kernel reports it). `frozen` follows the same
+  rules as in `list`.
 - `cpu_pct` here uses a fixed **200 ms** window (`sample_ms`) so opening a detail page does not pay
   the full list window; a process that exits or is recycled during it reports `null`.
 
@@ -1154,8 +1161,28 @@ ActivityManager may reset it on the next state change.
   "targets":[{"pid":23123,"before":0,"applied":-5,"verified":true}]}}
 ```
 
-Range `-20..=19`. Executes `renice -n <nice> -p <pid>` and reads `nice` back from `/proc/<pid>/stat`.
-When the command is unavailable the feature is not advertised and the verb returns `unsupported`.
+Range `-20..=19`. Uses `setpriority(2)` first and reads `nice` back from `/proc/<pid>/stat`; when the
+syscall fails it falls back to toybox `renice`, whose `-n` is an **increment** (`-n target − current`
+on toybox 0.8.13). When neither path is available the verb returns `unsupported`.
+
+#### `process sched <pid|package> <policy> [priority]` (experimental)
+
+```json
+{"v":1,"ok":true,"data":{
+  "target":"com.example.app","policy":"SCHED_RR","policy_id":2,"priority":25,
+  "persisted":false,
+  "targets":[{"pid":23123,"before":"SCHED_OTHER (0)","applied":"SCHED_RR (25)",
+              "verified":true,"mechanism":"sched_setscheduler"}],
+  "note":"Scheduling policy is one-shot and may be reset by ActivityManager"}}
+```
+
+`policy` accepts `other` (0), `fifo` (1), `rr` (2), `batch` (3) and `idle` (5), or the numeric value.
+Realtime policies (`fifo`, `rr`) require `priority` in `1..=99`; the others require `0` (the default).
+Each PID is set with `sched_setscheduler(2)` and read back from `/proc/<pid>/stat`; `applied` is
+`"<POLICY> (<priority>)"`. A PID that vanished or was reused is reported per target with
+`mechanism:"gone"`; a refused syscall with `mechanism:"failed"` and `error`. If no PID could be
+changed the verb fails with the first mapped error (`permission` for `EACCES` / `EPERM`, else `io`).
+High risk, hidden behind the experimental section, not persisted.
 
 #### `process cpuset <pid|package> <group>` (experimental)
 
@@ -1179,8 +1206,9 @@ into an **existing** group; never creates or deletes groups. One-shot and not pe
   "targets":[{"pid":23123,"before":0,"applied":1,"verified":true}]}}
 ```
 
-Mechanism is probed: the cgroup v2 leaf `cgroup.freeze` first, then `am freeze` / `am unfreeze` when
-present; if neither exists the feature is not advertised. `mechanism` names the path used. The
+Mechanism is probed: the cgroup v2 leaf `cgroup.freeze` first, then the cgroup v1
+`/dev/freezer/<path>/freezer.state`, then `am freeze` / `am unfreeze`; if none exists the feature is
+not advertised. `mechanism` names the path used (`cgroup-v2`, `cgroup-v1`, `am`). The
 `cgroup.*` path is verified by reading the switch back; the `am` fallback can only trust the command's
 exit status, so its targets carry `"verified": null` plus a `note` rather than a guessed `true`. High
 risk, hidden behind the experimental section, not persisted (a reboot thaws everything).
@@ -1201,11 +1229,23 @@ state, and a package action whose expansion contains any protected PID is reject
 anything. A vanished target is `invalid_arg` with `detail.gone:true`; an out-of-range value is
 `invalid_arg` with `detail.range:[min,max]`.
 
+#### Structured audit events
+
+Every action that reaches the write stage emits one `process_action` event (`category: "action"`,
+producer `process`) to the module-owned journal (`docs/event-system.md`). Validation failures and
+protected targets return before any event is written. Severity is `info` when the read-back confirmed
+every PID, `warning` when some PID survived or could not be verified. `metadata` always carries
+`action`, `target` and `verified`, plus the action's own fields: `user` and
+`pids_before` / `pids_after` for `stop`; `adjustment` for `oom`; `nice` for `renice`; `policy` /
+`priority` for `sched`; `group` for `cpuset`; `frozen` / `mechanism` for `freeze` / `unfreeze`.
+`applied` is included where a value is written, and `pids` wherever a package expanded. Event-store
+failures are ignored so they never fail the action.
+
 #### `caps` features
 
 Free-form strings owned by the module: `list`, `foreground`, `stop`, `oom_score_adj`, `renice`,
-`cpuset`, `freeze`. Clients must treat an absent feature as "hide the control", exactly as for other
-modules. `supported:false` with a `reason` hides the whole module.
+`sched`, `cpuset`, `freeze`. Clients must treat an absent feature as "hide the control", exactly as
+for other modules. `supported:false` with a `reason` hides the whole module.
 
 ### 3.26 Storage module (`storage.*`)
 

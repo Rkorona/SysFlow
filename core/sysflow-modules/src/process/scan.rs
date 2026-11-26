@@ -108,6 +108,7 @@ pub struct ProcessInfo {
     pub kthread: bool,
     pub oom_score_adj: Option<i64>,
     pub cgroup: Option<model::Cgroup>,
+    pub frozen: Option<bool>,
 }
 
 pub(crate) fn read_stat(fs: &Sysfs, pid: u32) -> Option<model::Stat> {
@@ -130,6 +131,7 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
         .read_lossy(&format!("/proc/{pid}/cgroup"))
         .ok()
         .map(|text| model::parse_cgroup(&text));
+    let frozen = read_frozen(fs, cgroup.as_ref());
     Some(ProcessInfo {
         pid,
         stat,
@@ -141,7 +143,67 @@ pub(crate) fn read_one(fs: &Sysfs, pid: u32) -> Option<ProcessInfo> {
         kthread: status.kthread,
         oom_score_adj,
         cgroup,
+        frozen,
     })
+}
+
+/// Whether the process is currently frozen (`cgroup.freeze` / `cgroup.events` on cgroup v2, or
+/// `/dev/freezer/<path>/freezer.state` on cgroup v1). Returns `None` when no freezer interface
+/// is exposed for this process.
+pub(crate) fn read_frozen(fs: &Sysfs, cgroup: Option<&model::Cgroup>) -> Option<bool> {
+    let cgroup = cgroup?;
+    if let Some(unified) = cgroup.unified.as_deref() {
+        let trimmed = unified.trim_end_matches('/');
+        if !trimmed.is_empty() {
+            let base = format!("/sys/fs/cgroup{trimmed}");
+            let freeze_file = format!("{base}/cgroup.freeze");
+            let events_file = format!("{base}/cgroup.events");
+            if let Ok(raw) = fs.read_str(&freeze_file) {
+                if raw.trim() == "1" {
+                    return Some(true);
+                }
+                if let Ok(events) = fs.read_str(&events_file) {
+                    for line in events.lines() {
+                        if let Some(val) = line
+                            .strip_prefix("frozen")
+                            .filter(|rest| rest.starts_with(char::is_whitespace))
+                        {
+                            return Some(val.trim() == "1");
+                        }
+                    }
+                }
+                return Some(false);
+            }
+            if let Ok(events) = fs.read_str(&events_file) {
+                for line in events.lines() {
+                    if let Some(val) = line
+                        .strip_prefix("frozen")
+                        .filter(|rest| rest.starts_with(char::is_whitespace))
+                    {
+                        return Some(val.trim() == "1");
+                    }
+                }
+            }
+        }
+    }
+    if let Some(v1_path) = cgroup.freezer.as_deref() {
+        let trimmed = v1_path.trim_end_matches('/');
+        let state_file = if trimmed.is_empty() {
+            "/dev/freezer/freezer.state".to_string()
+        } else {
+            format!("/dev/freezer{trimmed}/freezer.state")
+        };
+        if let Ok(raw) = fs.read_str(&state_file) {
+            let upper = raw.trim().to_ascii_uppercase();
+            if upper == "FROZEN" || upper == "FREEZING" {
+                return Some(true);
+            }
+            if upper == "THAWED" {
+                return Some(false);
+            }
+        }
+    }
+    None
 }
 
 /// The name a UI should show: the package for app processes, the basename for daemon paths.
@@ -385,6 +447,9 @@ fn row_json(row: &Row) -> Value {
             object.insert("cpuset".into(), json!(group));
         }
     }
+    if let Some(frozen) = info.frozen {
+        object.insert("frozen".into(), json!(frozen));
+    }
     object.insert("foreground".into(), json!(row.foreground));
     object.insert("system".into(), json!(row.system));
     object.insert("protected".into(), json!(row.protected.is_some()));
@@ -563,6 +628,10 @@ fn detail_with_sample(fs: &Sysfs, data_dir: &Path, pid: u32, sample_ms: u64) -> 
     object.insert("nice".into(), json!(info.stat.nice));
     object.insert("rt_priority".into(), json!(info.stat.rt_priority));
     object.insert("policy".into(), json!(info.stat.policy));
+    object.insert(
+        "policy_name".into(),
+        json!(model::sched_policy_name(info.stat.policy)),
+    );
     object.insert("start_time_ticks".into(), json!(info.stat.starttime));
     if let Some(cgroup) = &info.cgroup {
         object.insert(
@@ -578,6 +647,9 @@ fn detail_with_sample(fs: &Sysfs, data_dir: &Path, pid: u32, sample_ms: u64) -> 
                 .cpuset_group()
                 .map_or(Value::Null, |group| json!(group)),
         );
+    }
+    if let Some(frozen) = info.frozen {
+        object.insert("frozen".into(), json!(frozen));
     }
     object.insert("foreground".into(), json!(foreground));
     object.insert("system".into(), json!(system));
@@ -917,6 +989,7 @@ mod tests {
         assert_eq!(out["rss_kb"], 20_000);
         assert_eq!(out["oom_score_adj"], 100);
         assert_eq!(out["nice"], 0);
+        assert_eq!(out["policy_name"], "SCHED_OTHER");
         assert_eq!(out["cgroup"], "/apps/uid_10123/pid_10123");
         assert_eq!(out["cpuset"], "top-app");
         assert_eq!(out["cmdline"], json!(["com.example.app", "--flag"]));
@@ -962,5 +1035,41 @@ mod tests {
             sample.is_empty(),
             "recycled pid must not produce a percentage"
         );
+    }
+
+    #[test]
+    fn reads_frozen_state_from_cgroup_v2_and_v1() {
+        let root = temp("frozen-state");
+        add_process(&root, 101, "com.example.v2", 10101, 1000);
+        write(&root, "proc/101/cgroup", "0::/apps/uid_10101/pid_101\n");
+        write(
+            &root,
+            "sys/fs/cgroup/apps/uid_10101/pid_101/cgroup.freeze",
+            "1\n",
+        );
+
+        add_process(&root, 102, "com.example.events", 10102, 1000);
+        write(&root, "proc/102/cgroup", "0::/apps/uid_10102/pid_102\n");
+        write(
+            &root,
+            "sys/fs/cgroup/apps/uid_10102/pid_102/cgroup.freeze",
+            "0\n",
+        );
+        write(
+            &root,
+            "sys/fs/cgroup/apps/uid_10102/pid_102/cgroup.events",
+            "populated 1\nfrozen 1\n",
+        );
+
+        add_process(&root, 103, "com.example.v1", 10103, 1000);
+        write(&root, "proc/103/cgroup", "5:freezer:/frozen_app\n");
+        write(&root, "dev/freezer/frozen_app/freezer.state", "THAWED\n");
+
+        let fs = Sysfs::new(&root);
+        assert_eq!(read_one(&fs, 101).unwrap().frozen, Some(true));
+        assert_eq!(read_one(&fs, 102).unwrap().frozen, Some(true));
+        assert_eq!(read_one(&fs, 103).unwrap().frozen, Some(false));
+        let detail = detail_with_sample(&fs, &root.join("state-dir"), 101, 0).unwrap();
+        assert_eq!(detail["frozen"], true);
     }
 }

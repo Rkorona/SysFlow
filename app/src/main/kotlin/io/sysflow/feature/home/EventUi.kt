@@ -246,6 +246,30 @@ fun formatEventMetadata(metadataJson: String): String? {
         mark("pid")
         (value as? JsonPrimitive)?.longOrNull?.let { pid -> parts += "PID: $pid" }
     }
+    obj["action"]?.let { value ->
+        mark("action")
+        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { action ->
+            parts += "动作: $action"
+        }
+    }
+    obj["target"]?.let { value ->
+        mark("target")
+        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { target ->
+            parts += "目标: $target"
+        }
+    }
+    obj["mechanism"]?.let { value ->
+        mark("mechanism")
+        (value as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let { mechanism ->
+            parts += "机制: $mechanism"
+        }
+    }
+    obj["verified"]?.let { value ->
+        mark("verified")
+        (value as? JsonPrimitive)?.booleanOrNull?.let { verified ->
+            parts += if (verified) "读回校验: 已生效" else "读回校验: 未完全生效"
+        }
+    }
 
     mark("requested")
     mark("applied")

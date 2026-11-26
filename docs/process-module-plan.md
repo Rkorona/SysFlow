@@ -47,6 +47,16 @@
 | 22 | 实测 | `list --limit 50 --sample-ms 300` 墙钟 0.41–0.46 s，`get` 0.25 s，扫描 ~1100 进程 23–28 ms |
 | 23 | 实测 | `oom` 与 `cpuset` 会被 ROM/AMS 重置（oom 500 → 之后列表 920），与"一次性、不持久化"的设计一致 |
 
+**修订 4**（整合 AI Studio 快照，2026-11-26）：
+
+| # | 类型 | 变化 |
+|---|---|---|
+| 24 | 新增 | `sched`：`sched_setscheduler(2)`，`other/fifo/rr/batch/idle`，实时策略要求优先级 `1..=99`；仅实验区展示，不持久化 |
+| 25 | 新增 | 每个执行的动作写一条 `process_action` 事件（`sysflow_core::event`）；验证失败/受保护目标不写事件 |
+| 26 | 新增 | freezer 增加 cgroup v1 `/dev/freezer/<path>/freezer.state` 回退；`list` / `get` 增加 `frozen` 字段 |
+| 27 | 新增 | APK：多选批量 stop / freeze / unfreeze、自定义数字输入（±）、实时调度滑杆；新增模型测试用例 |
+| 28 | 说明 | sched / 事件 / 批量 UI 的 host 测试已通过；真机验证沿用会话记录，需在下次刷入后复核 |
+
 ## 目标
 
 - 让用户看清"**现在谁在占 CPU / 内存**"，并能回答"这个包是谁、几个进程、能不能动"。

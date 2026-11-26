@@ -51,6 +51,8 @@ pub struct Cgroup {
     pub unified: Option<String>,
     /// The cpuset controller path from a v1 hierarchy, if present.
     pub cpuset: Option<String>,
+    /// The freezer controller path from a v1 hierarchy (`/dev/freezer`), if present.
+    pub freezer: Option<String>,
 }
 
 impl Cgroup {
@@ -127,7 +129,7 @@ pub fn parse_cmdline(text: &str) -> String {
         .to_string()
 }
 
-/// Parse `/proc/<pid>/cgroup`: the v2 unified line and any v1 `cpuset` controller line.
+/// Parse `/proc/<pid>/cgroup`: the v2 unified line and any v1 `cpuset`/`freezer` lines.
 pub fn parse_cgroup(text: &str) -> Cgroup {
     let mut cgroup = Cgroup::default();
     for line in text.lines() {
@@ -145,8 +147,12 @@ pub fn parse_cgroup(text: &str) -> Cgroup {
         else {
             continue;
         };
-        if controllers.split(',').any(|c| c == "cpuset") {
-            cgroup.cpuset = Some(path.to_string());
+        for controller in controllers.split(',') {
+            if controller == "cpuset" {
+                cgroup.cpuset = Some(path.to_string());
+            } else if controller == "freezer" {
+                cgroup.freezer = Some(path.to_string());
+            }
         }
     }
     cgroup
@@ -181,6 +187,43 @@ pub fn parse_auxv(bytes: &[u8], key: u64) -> Option<u64> {
     None
 }
 
+/// Linux scheduling policy constants (`<linux/sched.h>`).
+pub const SCHED_OTHER: i32 = 0;
+pub const SCHED_FIFO: i32 = 1;
+pub const SCHED_RR: i32 = 2;
+pub const SCHED_BATCH: i32 = 3;
+pub const SCHED_IDLE: i32 = 5;
+
+/// Human-readable Linux scheduling policy name for `/proc/<pid>/stat` policy codes.
+pub fn sched_policy_name(policy: u32) -> &'static str {
+    match policy {
+        0 => "SCHED_OTHER",
+        1 => "SCHED_FIFO",
+        2 => "SCHED_RR",
+        3 => "SCHED_BATCH",
+        5 => "SCHED_IDLE",
+        6 => "SCHED_DEADLINE",
+        _ => "UNKNOWN",
+    }
+}
+
+/// Parse a scheduling policy name or numeric identifier (`other|fifo|rr|batch|idle`).
+pub fn parse_sched_policy(text: &str) -> Option<i32> {
+    match text.trim().to_ascii_lowercase().as_str() {
+        "0" | "other" | "normal" | "sched_other" | "sched_normal" => Some(SCHED_OTHER),
+        "1" | "fifo" | "sched_fifo" => Some(SCHED_FIFO),
+        "2" | "rr" | "sched_rr" => Some(SCHED_RR),
+        "3" | "batch" | "sched_batch" => Some(SCHED_BATCH),
+        "5" | "idle" | "sched_idle" => Some(SCHED_IDLE),
+        _ => None,
+    }
+}
+
+/// Whether `policy` is a real-time policy (`SCHED_FIFO` or `SCHED_RR`) requiring priority `1..=99`.
+pub fn is_realtime_policy(policy: i32) -> bool {
+    policy == SCHED_FIFO || policy == SCHED_RR
+}
+
 /// Packages whose termination breaks the device badly enough that they are never offered as an
 /// action target. UID < 10 000 already covers most platform processes; this list is the supplement
 /// for system apps that run under an app UID. Mirrors `docs/process-module-plan.md`〈保护名单〉.
@@ -193,7 +236,7 @@ pub const PROTECTED_PACKAGES: &[&str] = &[
     "com.android.nfc",
 ];
 
-/// Why a process may not be the target of `stop` / `oom` / `renice` / `cpuset` / `freeze`.
+/// Why a process may not be the target of `stop` / `oom` / `renice` / `sched` / `cpuset` / `freeze`.
 ///
 /// The order is deliberate: kernel identity first, then the platform UID gate, then the package
 /// list, then SysFlow itself.
@@ -288,10 +331,11 @@ mod tests {
 
     #[test]
     fn cgroup_reads_both_the_v2_line_and_the_v1_cpuset_controller() {
-        let text = "5:freezer:/\n4:cpuset:/top-app\n3:cpuacct:/top-app\n2:cpu:/top-app\n1:blkio:/top\n0::/apps/uid_10157/pid_12225\n";
+        let text = "5:freezer:/bg\n4:cpuset:/top-app\n3:cpuacct:/top-app\n2:cpu:/top-app\n1:blkio:/top\n0::/apps/uid_10157/pid_12225\n";
         let cgroup = parse_cgroup(text);
         assert_eq!(cgroup.unified.as_deref(), Some("/apps/uid_10157/pid_12225"));
         assert_eq!(cgroup.cpuset.as_deref(), Some("/top-app"));
+        assert_eq!(cgroup.freezer.as_deref(), Some("/bg"));
         assert_eq!(cgroup.cpuset_group().as_deref(), Some("top-app"));
     }
 
@@ -351,5 +395,25 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn sched_policy_helpers_cover_aliases_and_names() {
+        assert_eq!(parse_sched_policy("other"), Some(SCHED_OTHER));
+        assert_eq!(parse_sched_policy("SCHED_NORMAL"), Some(SCHED_OTHER));
+        assert_eq!(parse_sched_policy("FIFO"), Some(SCHED_FIFO));
+        assert_eq!(parse_sched_policy("2"), Some(SCHED_RR));
+        assert_eq!(parse_sched_policy("batch"), Some(SCHED_BATCH));
+        assert_eq!(parse_sched_policy("idle"), Some(SCHED_IDLE));
+        assert_eq!(parse_sched_policy("deadline"), None);
+        assert!(is_realtime_policy(SCHED_FIFO));
+        assert!(is_realtime_policy(SCHED_RR));
+        assert!(!is_realtime_policy(SCHED_OTHER));
+        assert!(!is_realtime_policy(SCHED_BATCH));
+        assert!(!is_realtime_policy(SCHED_IDLE));
+        assert_eq!(sched_policy_name(0), "SCHED_OTHER");
+        assert_eq!(sched_policy_name(1), "SCHED_FIFO");
+        assert_eq!(sched_policy_name(5), "SCHED_IDLE");
+        assert_eq!(sched_policy_name(99), "UNKNOWN");
     }
 }

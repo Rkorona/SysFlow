@@ -36,6 +36,7 @@ data class ProcessEntry(
     val oomScoreAdj: Int?,
     val cgroup: String?,
     val cpuset: String?,
+    val frozen: Boolean? = null,
     val foreground: Boolean,
     val system: Boolean,
     val protected: Boolean,
@@ -91,9 +92,11 @@ data class ProcessDetail(
     val nice: Int,
     val rtPriority: Int,
     val policy: Int,
+    val policyName: String? = null,
     val cgroup: String?,
     val cpuset: String?,
     val startTimeTicks: Long,
+    val frozen: Boolean? = null,
     val foreground: Boolean,
     val system: Boolean,
     val protected: Boolean,
@@ -111,9 +114,13 @@ data class ProcessActionTarget(
 )
 
 data class ProcessActionResult(
+    val pkg: String?,
     val target: String?,
     val adjustment: Int?,
     val nice: Int?,
+    val policy: String?,
+    val policyId: Int?,
+    val priority: Int?,
     val group: String?,
     val frozen: Boolean?,
     val mechanism: String?,
@@ -170,6 +177,7 @@ fun parseProcessEntry(json: JsonObject): ProcessEntry = ProcessEntry(
     oomScoreAdj = json.int("oom_score_adj"),
     cgroup = json.string("cgroup"),
     cpuset = json.string("cpuset"),
+    frozen = json.bool("frozen"),
     foreground = json.bool("foreground") ?: false,
     system = json.bool("system") ?: false,
     protected = json.bool("protected") ?: false,
@@ -197,9 +205,11 @@ fun parseProcessDetail(json: JsonObject): ProcessDetail = ProcessDetail(
     nice = json.int("nice") ?: 0,
     rtPriority = json.int("rt_priority") ?: 0,
     policy = json.int("policy") ?: 0,
+    policyName = json.string("policy_name"),
     cgroup = json.string("cgroup"),
     cpuset = json.string("cpuset"),
     startTimeTicks = json.long("start_time_ticks") ?: 0L,
+    frozen = json.bool("frozen"),
     foreground = json.bool("foreground") ?: false,
     system = json.bool("system") ?: false,
     protected = json.bool("protected") ?: false,
@@ -207,9 +217,13 @@ fun parseProcessDetail(json: JsonObject): ProcessDetail = ProcessDetail(
 )
 
 fun parseProcessAction(json: JsonObject): ProcessActionResult = ProcessActionResult(
+    pkg = json.string("package"),
     target = json.string("target"),
     adjustment = json.int("adjustment"),
     nice = json.int("nice"),
+    policy = json.string("policy"),
+    policyId = json.int("policy_id"),
+    priority = json.int("priority"),
     group = json.string("group"),
     frozen = json.bool("frozen"),
     mechanism = json.string("mechanism"),
@@ -258,6 +272,29 @@ fun processSubtitle(entry: ProcessEntry): String = buildString {
     entry.oomScoreAdj?.let { append(" · OOA $it") }
     if (entry.state.isNotBlank() && entry.state != "S") append(" · ${entry.state}")
 }
+
+/** Human-readable Linux scheduling policy label. */
+fun schedPolicyLabel(policy: Int, policyName: String? = null): String =
+    policyName?.takeIf { it.isNotBlank() && it != "UNKNOWN" } ?: when (policy) {
+        0 -> "SCHED_OTHER"
+        1 -> "SCHED_FIFO"
+        2 -> "SCHED_RR"
+        3 -> "SCHED_BATCH"
+        5 -> "SCHED_IDLE"
+        6 -> "SCHED_DEADLINE"
+        else -> "POLICY($policy)"
+    }
+
+/** CLI argument name for `sysflow process sched`. */
+fun schedPolicyArg(policy: Int): String = when (policy) {
+    1 -> "fifo"
+    2 -> "rr"
+    3 -> "batch"
+    5 -> "idle"
+    else -> "other"
+}
+
+fun isRealtimeSchedPolicy(policy: Int): Boolean = policy == 1 || policy == 2
 
 private fun JsonObject.obj(key: String): JsonObject? = this[key] as? JsonObject
 private fun JsonObject.array(key: String): JsonArray = this[key] as? JsonArray ?: JsonArray(emptyList())

@@ -146,4 +146,90 @@ class ProcessModelsTest {
         )
         assertEquals("UID 0 · 3 线程", processSubtitle(entry))
     }
+
+    @Test
+    fun list_parses_the_frozen_field() {
+        val list = parseProcessList(
+            json(
+                """
+                {"available": true, "total": 1, "returned": 1, "truncated": false, "skipped": 0,
+                 "sample_ms": 300, "clock_ticks": 100, "cpuset_groups": [],
+                 "foreground": {"available": false, "package": null, "pid": null, "user": 0,
+                                "cached": false, "disabled": true},
+                 "processes": [
+                   {"pid": 8123, "ppid": 701, "uid": 10123, "user": 0, "app_id": 10123,
+                    "package": "com.example.app", "name": "com.example.app",
+                    "cmdline": "com.example.app", "state": "S", "threads": 12,
+                    "rss_kb": 136684, "cpu_pct": 12.5, "cpu_ticks": 38, "oom_score_adj": 0,
+                    "cgroup": "/apps/uid_10123/pid_8123", "cpuset": "top-app", "frozen": true,
+                    "foreground": true, "system": false, "protected": false}
+                 ]}
+                """,
+            ),
+        )
+        assertEquals(true, list.entries.single().frozen)
+        assertEquals("133.5 MB", formatProcessKb(list.entries.single().rssKb))
+    }
+
+    @Test
+    fun detail_parses_the_policy_name_and_frozen_state() {
+        val detail = parseProcessDetail(
+            json(
+                """
+                {"pid": 8123, "ppid": 701, "uid": 10123, "user": 0, "app_id": 10123,
+                 "package": "com.example.app", "packages": ["com.example.app"],
+                 "name": "com.example.app", "cmdline": ["com.example.app", "--worker"],
+                 "state": "S", "threads": 8, "rss_kb": 51200, "pss_kb": 40960, "swap_pss_kb": 0,
+                 "cpu_pct": 1.2, "sample_ms": 200, "oom_score_adj": 100,
+                 "nice": -5, "rt_priority": 10, "policy": 1, "policy_name": "SCHED_FIFO",
+                 "cgroup": "/apps/uid_10123/pid_8123", "cpuset": "top-app",
+                 "start_time_ticks": 999, "frozen": false,
+                 "foreground": false, "system": false, "protected": false}
+                """,
+            ),
+        )
+        assertEquals(false, detail.frozen)
+        assertEquals("SCHED_FIFO", schedPolicyLabel(detail.policy, detail.policyName))
+        assertEquals("fifo", schedPolicyArg(detail.policy))
+        assertTrue(isRealtimeSchedPolicy(detail.policy))
+        assertFalse(isRealtimeSchedPolicy(0))
+        assertEquals(listOf("com.example.app", "--worker"), detail.cmdline)
+    }
+
+    @Test
+    fun action_parses_sched_and_stop_results() {
+        val sched = parseProcessAction(
+            json(
+                """
+                {"target": "com.example.app", "policy": "SCHED_RR", "policy_id": 2, "priority": 25,
+                 "targets": [
+                   {"pid": 8123, "before": "SCHED_OTHER (0)", "applied": "SCHED_RR (25)",
+                    "verified": true, "mechanism": "sched_setscheduler"}
+                 ]}
+                """,
+            ),
+        )
+        assertEquals("SCHED_RR", sched.policy)
+        assertEquals(2, sched.policyId)
+        assertEquals(25, sched.priority)
+        assertEquals("SCHED_OTHER (0)", sched.targets.first().before)
+        assertEquals("SCHED_RR (25)", sched.targets.first().applied)
+
+        val stop = parseProcessAction(
+            json("""{"package": "com.example.app", "user": 0, "pids_before": [1, 2], "pids_after": [], "verified": true, "already_stopped": false}"""),
+        )
+        assertEquals("com.example.app", stop.pkg)
+        assertNull(stop.target)
+        assertEquals(true, stop.verified)
+    }
+
+    @Test
+    fun custom_numeric_helpers_handle_signs_and_bounds() {
+        assertEquals("-15", filterSignedDigits(" -1a5b ", 3))
+        assertEquals("123", filterSignedDigits("12-34", 3))
+        assertEquals("-", toggleNumberSign("0"))
+        assertEquals("", toggleNumberSign("-"))
+        assertEquals("-10", toggleNumberSign("10"))
+        assertEquals("10", toggleNumberSign("-10"))
+    }
 }

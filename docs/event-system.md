@@ -92,8 +92,10 @@ charging started/stopped, fully charged, low battery, battery temperature high).
 CPU adaptive controller emits thermal-protection, battery-saving and PSI guard transitions. The
 memory module emits `mem_pressure_high` / `mem_pressure_recovered` / `mem_oom_kill` from inside its
 `sample()` and `mem_setting_contested` when a sysctl keeps being reset. The wake-lock module emits
-`wakelock_long_held` from its own `sample()`. More specific module events should be added at the code
-that owns the state transition, rather than in APK refresh or UI code.
+`wakelock_long_held` from its own `sample()`. The process module emits one `process_action` event per
+executed `stop` / `oom` / `renice` / `sched` / `cpuset` / `freeze` action (metadata carries the
+target, the applied value and whether the read-back verified it). More specific module events should
+be added at the code that owns the state transition, rather than in APK refresh or UI code.
 
 ## APK / Room behavior
 

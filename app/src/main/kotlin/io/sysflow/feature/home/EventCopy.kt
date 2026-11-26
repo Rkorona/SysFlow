@@ -122,6 +122,7 @@ private val eventLabels = mapOf(
     "corrupt_config_cleared" to "损坏配置已清理",
     "recovery_restored" to "隔离配置已恢复",
     "recovery_discarded" to "隔离配置已丢弃",
+    "process_action" to "进程操作",
 )
 
 /** Two identical records closer together than this are the same occurrence, reported twice. */
@@ -251,6 +252,7 @@ fun activityDetail(event: SystemEventEntity): String {
             val hours = meta.number("suppress_s")?.div(3600.0)?.roundPercent()?.takeIf { it > 0 } ?: 6L
             "系统反复把 $name 改回$live，已暂停重新应用 $hours 小时"
         }
+        "process_action" -> processActionDetail(meta, event.message)
         else -> event.message
     }
 }
@@ -356,4 +358,32 @@ private fun psiDetail(meta: JsonObject): String {
     meta.number("available_kb")?.div(1_048_576.0)?.roundPercent()?.let { parts.add("可用 $it GB") }
     meta.number("swap_used_kb")?.div(1_048_576.0)?.roundPercent()?.let { parts.add("swap $it GB") }
     return if (parts.isEmpty()) "" else "（${parts.joinToString("，")}）"
+}
+
+private fun processActionDetail(meta: JsonObject, fallback: String): String {
+    val action = meta.string("action") ?: return fallback
+    val target = meta.string("target") ?: return fallback
+    val verified = (meta["verified"] as? JsonPrimitive)?.booleanOrNull
+    val suffix = if (verified == false) "（未完全生效）" else ""
+    return when (action) {
+        "stop" -> "强制停止 $target$suffix"
+        "oom" -> meta.number("applied")
+            ?.let { "调整 $target 的 oom_score_adj 为 ${it.roundPercent()}$suffix" }
+            ?: "调整 $target 的 oom_score_adj$suffix"
+        "renice" -> meta.number("applied")
+            ?.let { "调整 $target 的 nice 为 ${it.roundPercent()}$suffix" }
+            ?: "调整 $target 的 nice$suffix"
+        "sched" -> {
+            val policy = meta.string("policy") ?: "调度策略"
+            val prio = meta.number("priority")?.roundPercent()
+            if (prio != null && prio > 0) "设置 $target 为 $policy（优先级 $prio）$suffix"
+            else "设置 $target 为 $policy$suffix"
+        }
+        "cpuset" -> meta.string("group")
+            ?.let { "将 $target 移入 cpuset $it$suffix" }
+            ?: "调整 $target 的 cpuset$suffix"
+        "freeze" -> "冻结 $target$suffix"
+        "unfreeze" -> "解冻 $target$suffix"
+        else -> fallback
+    }
 }
