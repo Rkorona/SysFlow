@@ -3,6 +3,7 @@ package io.sysflow.feature.storage
 import io.sysflow.core.model.Schema
 import io.sysflow.core.ui.components.ChartPoint
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
@@ -96,8 +97,8 @@ data class StorageOptions(
 private const val DATA = "storage.data"
 private const val SDCARD = "storage.sdcard"
 
-fun parseStorageSnapshot(module: JsonObject?): StorageSnapshot? {
-    if (module == null) return null
+fun parseStorageSnapshot(value: JsonElement?): StorageSnapshot? {
+    val module = value as? JsonObject ?: return null
     val capacity = parseCapacity(module, DATA) ?: return null
     val sdcard = parseCapacity(module, SDCARD)
     val device = StorageDevice(
