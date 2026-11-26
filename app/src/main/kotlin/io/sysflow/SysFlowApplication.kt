@@ -12,6 +12,7 @@ import io.sysflow.feature.home.AppViewModel
 import io.sysflow.feature.settings.SettingsViewModel
 import io.sysflow.feature.mem.MemViewModel
 import io.sysflow.feature.process.ProcessViewModel
+import io.sysflow.feature.storage.StorageViewModel
 import io.sysflow.feature.wakelock.WakelockViewModel
 import io.sysflow.feature.diag.DiagnosticsViewModel
 import io.sysflow.feature.cpuset.CpusetViewModel
@@ -40,6 +41,7 @@ private val appModule = module {
     viewModel { WakelockViewModel(get()) }
     viewModel { MemViewModel(get()) }
     viewModel { ProcessViewModel(get()) }
+    viewModel { StorageViewModel(get()) }
 }
 
 class SysFlowApplication : Application() {

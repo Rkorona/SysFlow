@@ -33,7 +33,7 @@ import kotlin.math.min
  * buffer is still filling.
  */
 @Composable
-internal fun Sparkline(
+fun Sparkline(
     values: List<Int>,
     color: Color,
     modifier: Modifier = Modifier,
@@ -113,7 +113,7 @@ data class ChartPoint(val x: Long, val y: Float)
  * the data decides and a flat series is drawn through the middle instead of as a full-height line.
  */
 @Composable
-internal fun LineChart(
+fun LineChart(
     points: List<ChartPoint>,
     color: Color,
     modifier: Modifier = Modifier,

@@ -222,6 +222,34 @@ class SysFlowClient(private val root: RootExecutor) {
             run("process", if (frozen) "freeze" else "unfreeze", target),
         ).jsonObject
 
+    /** Live storage throughput (protocol §3.26); needs an interval, so it is a verb. */
+    suspend fun storageIo(intervalMs: Int = 1_000): JsonObject {
+        val args = buildList {
+            add("storage"); add("io")
+            add("--interval-ms"); add(intervalMs.coerceIn(300, 5_000).toString())
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
+    /** Bounded directory-size ranking; never part of `snapshot` (it walks the tree). */
+    suspend fun storageUsage(
+        path: String = "/data",
+        limit: Int = 20,
+        budgetMs: Int = 3_000,
+    ): JsonObject {
+        val args = buildList {
+            add("storage"); add("usage")
+            add("--path"); add(path)
+            add("--limit"); add(limit.coerceIn(1, 100).toString())
+            add("--budget-ms"); add(budgetMs.coerceIn(100, 30_000).toString())
+        }
+        return parseEnvelope<JsonObject>(run(*args.toTypedArray())).jsonObject
+    }
+
+    /** One-shot `fstrim -v /data`. */
+    suspend fun storageTrim(path: String = "/data"): JsonObject =
+        parseEnvelope<JsonObject>(run("storage", "trim", "--path", path)).jsonObject
+
     /**
      * Userspace wake locks currently held (protocol §3.19).
      *

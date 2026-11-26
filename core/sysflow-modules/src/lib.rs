@@ -6,6 +6,7 @@ pub mod cpu;
 pub mod mem;
 pub mod mock;
 pub mod process;
+pub mod storage;
 pub mod wakelock;
 
 use sysflow_core::ctx::Ctx;
@@ -29,6 +30,18 @@ pub fn builtin(ctx: &Ctx) -> Vec<Box<dyn Module>> {
             ctx.data_dir.join("state"),
         )),
         Box::new(process::ProcessModule::new(ctx.sysfs.clone())),
+        Box::new({
+            let storage = storage::StorageModule::with_state_dir(
+                ctx.sysfs.clone(),
+                ctx.data_dir.join("state"),
+            );
+            // Host/test override: lets the storage verbs be exercised against a temp directory,
+            // exactly like SYSFLOW_SYSFS_ROOT does for sysfs. Unset on device.
+            match std::env::var("SYSFLOW_STORAGE_DATA_PATH") {
+                Ok(path) if !path.is_empty() => storage.with_data_path(path),
+                _ => storage,
+            }
+        }),
     ];
     if std::env::var("SYSFLOW_MOCK")
         .map(|s| s == "1")

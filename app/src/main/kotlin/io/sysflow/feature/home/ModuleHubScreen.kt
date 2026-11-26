@@ -38,12 +38,15 @@ fun ModuleHubScreen(
     onOpenMem: () -> Unit = {},
     processReady: Boolean = false,
     onOpenProcess: () -> Unit = {},
+    storageReady: Boolean = false,
+    onOpenStorage: () -> Unit = {},
 ) {
     val cpuReady = caps.modules["cpu"]?.supported == true
     val batterySupported = batteryReady || caps.modules["battery"]?.supported == true
     val wakelockSupported = wakelockReady || caps.modules["wakelock"]?.supported == true
     val memSupported = memReady || caps.modules["mem"]?.supported == true
     val processSupported = processReady || caps.modules["process"]?.supported == true
+    val storageSupported = storageReady || caps.modules["storage"]?.supported == true
     LazyColumn(
         modifier = modifier.fillMaxSize(),
         contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 16.dp, bottom = 120.dp),
@@ -98,6 +101,8 @@ fun ModuleHubScreen(
                         title = "储存管理",
                         subtitle = "空间 · 文件 · I/O",
                         icon = Icons.Rounded.FolderOpen,
+                        ready = storageSupported,
+                        onClick = if (storageSupported) onOpenStorage else null,
                     )
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {

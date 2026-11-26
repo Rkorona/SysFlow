@@ -1207,6 +1207,125 @@ Free-form strings owned by the module: `list`, `foreground`, `stop`, `oom_score_
 `cpuset`, `freeze`. Clients must treat an absent feature as "hide the control", exactly as for other
 modules. `supported:false` with a `reason` hides the whole module.
 
+### 3.26 Storage module (`storage.*`)
+
+> **Status: implemented on the host (Steps 0–5); device acceptance pending.** The items, the two
+> queue tunables and the `io` / `usage` / `trim` verbs are covered by host tests against a fake
+> `/sys` and `/proc`; the device matrix in `docs/modules/storage.md` is filled by running
+> `sysflow storage probe` on the phone.
+
+The module id is `storage`. Unlike the process module it participates in `snapshot`: capacity and
+boot-cumulative I/O counters are cheap reads. Throughput needs an interval and is therefore a verb
+and a history series, never a snapshot item.
+
+#### Items
+
+| item | type | unit | meaning |
+|---|---|---|---|
+| `storage.data.total_kb` / `used_kb` / `free_kb` / `avail_kb` | readonly | kB | `statvfs` on `/data`: `used = total − free`; `avail` is what a non-root writer can use |
+| `storage.data.used_pct` | readonly | % | integer percentage, `used / total` |
+| `storage.sdcard.*` | readonly | kB / % | only when `/storage/emulated/0` is a **different** device than `/data` (normally it is not) |
+| `storage.device.name` | readonly | — | sysfs block name of the physical device behind `/data` (e.g. `sda`) |
+| `storage.device.size_kb` | readonly | kB | whole-device size (`/sys/block/<dev>/size` × 512) |
+| `storage.device.model` | readonly | — | `device/model`, when the kernel exposes it |
+| `storage.device.rotational` | readonly | — | `queue/rotational == 1` |
+| `storage.device.health_pct` | readonly | % | remaining write-endurance estimate from a JEDEC `life_time` / `life_time_estimation` counter (`0x01..0x0a` = 10 %…100 % used, `0x0b` = exhausted). Omitted when the vendor exposes no counter in that format |
+| `storage.scheduler` | enum / low / persist | — | current I/O scheduler; options are the kernel's own list |
+| `storage.read_ahead_kb` | int_enum / low / persist | kB | `queue/read_ahead_kb`; offered values are 128…4096, plus the current value if it is outside that set |
+| `storage.io.read_kb` / `write_kb` | readonly | kB | sectors × 512 bytes, cumulative since boot |
+| `storage.io.read_ios` / `write_ios` | readonly | — | completed requests since boot |
+
+Both tunables apply to the **physical** device behind the mount (`dm-5 → sda` through
+`/sys/block/dm-5/slaves/`), because device-mapper nodes have no queue scheduler. A missing physical
+device makes the module report `unsupported` rather than writing to the wrong node.
+
+- **Validation before writing.** A value outside the kernel's option list is `invalid_arg` and
+  nothing is written. The two items are written in dependency order and rolled back if the second
+  write fails.
+- **Read back.** `applied` is the kernel's answer; `mismatch` lists refused keys.
+- **Drift is repaired** through the normal daemon loop; a value the ROM keeps resetting follows the
+  same back-off policy as the other modules.
+- **Boot replay is sanitised**: a scheduler removed by a kernel update or a read-ahead outside the
+  offered set is dropped instead of failing the whole module.
+
+#### `storage io`
+
+```sh
+sysflow storage io [--interval-ms 1000]
+```
+
+```json
+{"v":1,"ok":true,"data":{
+  "device":"sda","model":"Samsung UFS","scheduler":"mq-deadline","interval_ms":1000,
+  "read_kb":2048,"write_kb":512,"read_iops":12.0,"write_iops":3.0,"util_pct":4.5,
+  "total_read_kb":10000,"total_write_kb":4000}}
+```
+
+- Two readings of `/proc/diskstats` separated by `interval_ms` (clamped to 300..5000); rates divide
+  by the **measured** elapsed time.
+- `util_pct` is `Δ(io_ms) / elapsed`, clamped to 100. `read_kb` / `write_kb` are for the interval;
+  `total_*` are cumulative since boot.
+- A counter that went backwards is saturated to zero (device reset), never reported negative.
+
+#### `storage usage`
+
+```sh
+sysflow storage usage [--path /data] [--limit 20] [--budget-ms 3000]
+```
+
+```json
+{"v":1,"ok":true,"data":{
+  "path":"/data","partial":false,"elapsed_ms":412,"denied":0,"visited":18342,
+  "limit":20,"total_kb":5242880,
+  "entries":[{"name":"media","path":"/data/media","kb":3145728,"files":12034,"dirs":412}]}}
+```
+
+- Walks the top-level entries of `path`, each with its recursive size, and sorts by allocated bytes
+  (`st_blocks × 512`, not apparent size).
+- **Time-bounded**: stops at the budget and reports `partial:true`; `visited` says how far it got.
+- **Symlinks are never followed and other filesystems are not crossed**, so `/data/media` (and bind
+  mounts) cannot be counted twice. Unreadable entries increment `denied` instead of failing.
+- `limit` is clamped to 1..100. This is the heaviest verb in SysFlow; the APK only runs it on an
+  explicit tap.
+
+#### `storage trim`
+
+```sh
+sysflow storage trim [--path /data]
+```
+
+```json
+{"v":1,"ok":true,"data":{
+  "path":"/data","binary":"/system/bin/fstrim",
+  "trimmed_bytes":131072,"output":"/data: 131072 bytes trimmed","ms":840}}
+```
+
+- Runs `fstrim -v <path>` once. Only `/data` (or `/storage/emulated/0`) is accepted, so a typo cannot
+  trim an arbitrary mount.
+- Not persisted, not part of drift, never replayed at boot. `unsupported` when the ROM has no
+  `fstrim` binary.
+
+#### `caps` features
+
+Free-form strings owned by the module: `data`, `sdcard`, `io`, `scheduler`, `read_ahead`, `trim`,
+`usage`. Clients hide the corresponding control when a feature is absent.
+
+#### History and events
+
+`storage` samples every **300 s** into `history/storage.jsonl`:
+
+| series | unit | source |
+|---|---|---|
+| `used_kb` / `free_kb` | kB | `statvfs` on every sample |
+| `used_pct` | % | derived from the two above |
+| `read_kb` / `write_kb` | kB | `Δ` of `/proc/diskstats` sectors × 512, divided by the measured interval |
+| `io_util_pct` | % | `Δ(io_ms) / Δt` |
+
+The first sample after a boot (or after a counter regression) omits the delta series rather than
+writing `0`. Events: `storage_low_space` (warning, category `space`) when `/data` crosses **90 %**
+used, and `storage_space_recovered` (info) when it falls to **85 %** or below; both are deduped and
+hysteretic so a bar hovering at the line does not emit every five minutes.
+
 ## 4. Generated client types
 
 `core/sysflow-types` is the Rust source of truth for the wire model. Regenerate the client model
@@ -1247,5 +1366,6 @@ type, so `boot status` is still parsed as `JsonObject`.
 |---|---|---|
 | `SYSFLOW_DATA_DIR` | `/data/adb/sysflow` | config, log, history, `state/cpu.json` |
 | `SYSFLOW_MODULE_DIR` | `/data/adb/modules/sysflow` | rescue marker lookup |
+| `SYSFLOW_STORAGE_DATA_PATH` | `/data` | mount path the storage module reports on (host tests use a temp dir) |
 | `SYSFLOW_SYSFS_ROOT` | `/` | fake sysfs/procfs tree |
 | `SYSFLOW_MOCK` | unset | `1` registers the mock module |

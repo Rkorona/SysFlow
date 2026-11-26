@@ -1,6 +1,6 @@
 # 进程模块（M4）开发计划
 
-> 状态：**Step 0–5 完成，动作写路径已于 2026-11-26 在 S25 验证**（v0.2.3）；APK 由用户构建，剩余验收项见 `docs/modules/process.md`〈Device checklist〉。
+> 状态：**Step 0–6 完成（2026-11-26，v0.2.3）**：契约、探针、只读面、动作、实验动作与 M3E APK 页面全部落地；动作写路径、保护拦截与 APK 构建/运行已在 S25 验证。剩余仅可选对拍项，见 `docs/modules/process.md`〈Device checklist〉。
 > 修订 2 记录了真机推翻的三个假设（sysconf、renice 增量、freezer 路径）；未验证的行为仍不写进协议正文（§3.25 Draft）。
 >
 > 关联：`docs/development-plan.md` §7.5（功能设计）与 §12 阶段 4（里程碑）、
@@ -398,7 +398,7 @@ APK 每 2 s 轮询时使用 `--sample-ms 300 --limit 80`（页面滚动到底再
 | 3 | 动作（medium） | `stop` / `renice` / `oom` + 保护全量拒绝 + 读回 + 日志 | ✅ 主机完成：保护/范围/读回假根测试通过；`renice` 走 `setpriority(2)`、toybox 仅回退；真机写路径待验 | 2 | 2 d |
 | 4 | 实验动作 | `cpuset` / `freeze` / `unfreeze`，按 Step 1 探测结果决定保留哪些；feature flag 控制 | ✅ 主机完成：cgroup v2 `apps/` 叶子 + `am` 回退两条路径；真机 freezer 叶子与写入待验 | 3 | 1.5 d |
 | 5 | APK 进程页 | `feature/process/`（Models / ViewModel / Screen）+ 导航 / Koin 接线 + `SysFlowClient` 动词 + 确认弹窗 | ✅ 主机代码完成（模型单测 + 解析；页面仅进入时 2 s 轮询、保护行降级、实验区默认关闭）；APK 构建由用户执行 | 2、3 | 2.5 d |
-| 6 | 真机验收与文档回填 | 平滑度、排序对拍、保护演练、恢复演练；`docs/modules/process.md` 实测值 / 降级原因 / 计时；README 增补 | 成功标准 1–6 逐条通过 | 4、5 | 1 d |
+| 6 | 真机验收与文档回填 | 平滑度、排序对拍、保护演练、恢复演练；`docs/modules/process.md` 实测值 / 降级原因 / 计时；README 增补 | ✅ 动作/保护/APK 构建运行已验证并回填；排序对拍、多用户、APK 视觉细节为可选 | 4、5 | 1 d |
 
 合计约 10.5 d（与 `development-plan.md` 阶段 4 的 2–3 周一致，含真机往返）。
 Step 5 的 Models / Screen 骨架可在 Step 2 后提前写（只依赖协议形状，不依赖动作）。

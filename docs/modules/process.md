@@ -4,11 +4,10 @@ Implementation: `core/sysflow-modules/src/process/` (planned: `mod.rs`, `scan.rs
 `actions.rs`, `tests.rs`). Protocol: `docs/protocol.md` §3.25. Plan and decisions:
 `docs/process-module-plan.md`.
 
-> **Status: Steps 1–5 implemented; the action write path was verified on the S25 on 2026-11-26
-> (v0.2.3).** `oom`, `renice`, `cpuset`, `freeze`/`unfreeze` and `stop` all worked and read back
-> correctly, and the protection gate rejected `com.android.systemui`. The remaining items are listed
-> under **Device checklist**. The APK page code is written against the same protocol (the APK is
-> built by the device owner).
+> **Status: Steps 1–6 implemented and verified on the S25 (v0.2.3, 2026-11-26).** `oom`, `renice`,
+> `cpuset`, `freeze`/`unfreeze` and `stop` all worked and read back correctly, the protection gate
+> rejected `com.android.systemui`, and the M3E APK page was built and ran successfully. Remaining
+> items are the optional cross-checks under **Device checklist**.
 
 This document is updated at the end of **every** step with the measured value or the reason a path
 was dropped. The read-only half is safe (no writes); the action half is one-shot and never touches
@@ -163,14 +162,15 @@ Verified on 2026-11-26 with v0.2.3 (S25). **Confirmed working:**
 - `list --limit 50 --sample-ms 300` took **0.41–0.46 s** wall; `get` **0.25 s**; ~1100 processes
   scanned in 23–28 ms.
 
-**Still open:**
+**Still open (optional cross-checks):**
 
 1. A cpuset move that actually changes groups (e.g. `background` → `top-app`), then whether AMS
    moves it back.
 2. Same-instant cross-check: `list --sort rss` vs `dumpsys meminfo` and `--sort cpu` vs `top`.
 3. Multi-user labels (work profile / secure folder): `user` and the package suffix.
-4. APK build and visual/interaction acceptance: 2 s polling stops when backgrounded, protected rows
-   disable actions, experimental section only when `caps.features` allows.
+4. APK visual/interaction pass (build and first run **confirmed** 2026-11-26): 2 s polling stops
+   when backgrounded, protected rows disable actions, experimental section only when
+   `caps.features` allows.
 5. `am freeze` fallback (not exercised because the cgroup v2 leaf exists).
 
 ## Measured costs

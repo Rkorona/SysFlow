@@ -62,6 +62,7 @@ import io.sysflow.feature.screenoff.ScreenOffScreen
 import io.sysflow.feature.settings.SettingsScreen
 import io.sysflow.feature.mem.MemScreen
 import io.sysflow.feature.process.ProcessScreen
+import io.sysflow.feature.storage.StorageScreen
 import io.sysflow.feature.wakelock.WakelockScreen
 import io.sysflow.ui.navigation.Destination
 import io.sysflow.ui.navigation.FloatingNavBar
@@ -82,6 +83,7 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
     var wakelockDetail by rememberSaveable { mutableStateOf(false) }
     var memDetail by rememberSaveable { mutableStateOf(false) }
     var processDetail by rememberSaveable { mutableStateOf(false) }
+    var storageDetail by rememberSaveable { mutableStateOf(false) }
     var batteryOpenedFromOverview by rememberSaveable { mutableStateOf(false) }
     var adaptiveDetail by rememberSaveable { mutableStateOf(false) }
     var cpusetDetail by rememberSaveable { mutableStateOf(false) }
@@ -111,6 +113,7 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
         wakelockDetail = wakelockDetail,
         memDetail = memDetail,
         processDetail = processDetail,
+        storageDetail = storageDetail,
         eventHistoryOpen = eventHistoryOpen,
         moduleActivityOpen = moduleActivityOpen,
         adaptiveDetail = adaptiveDetail,
@@ -184,6 +187,10 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
             }
             route.destination == Destination.Modules && processDetail -> {
                 processDetail = false
+                current = Destination.Modules
+            }
+            route.destination == Destination.Modules && storageDetail -> {
+                storageDetail = false
                 current = Destination.Modules
             }
             route.destination == Destination.Modules && route.batteryDetail -> {
@@ -291,6 +298,7 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
             route.destination == Destination.Modules && route.wakelockDetail -> WakelockScreen()
             route.destination == Destination.Modules && route.memDetail -> MemScreen()
             route.destination == Destination.Modules && route.processDetail -> ProcessScreen()
+            route.destination == Destination.Modules && route.storageDetail -> StorageScreen()
             route.destination == Destination.Modules && route.batteryDetail && route.batteryRankingOpen ->
                 BatteryRankingScreen(loadApps = { refresh -> viewModel.loadBatteryApps(refresh) })
             route.destination == Destination.Modules && route.batteryDetail -> BatteryScreen(
@@ -323,6 +331,16 @@ fun SysFlowApp(viewModel: AppViewModel = koinViewModel()) {
                         wakelockReady = caps.modules["wakelock"]?.supported == true,
                         memReady = state.snapshot?.modules?.get("mem") != null,
                         processReady = caps.modules["process"]?.supported == true,
+                        storageReady = caps.modules["storage"]?.supported == true,
+                        onOpenStorage = {
+                            cpuDetail = false
+                            batteryDetail = false
+                            wakelockDetail = false
+                            memDetail = false
+                            processDetail = false
+                            storageDetail = true
+                            current = Destination.Modules
+                        },
                         onOpenProcess = {
                             cpuDetail = false
                             batteryDetail = false
@@ -478,6 +496,7 @@ private data class ScreenRoute(
     val wakelockDetail: Boolean = false,
     val memDetail: Boolean = false,
     val processDetail: Boolean = false,
+    val storageDetail: Boolean = false,
     val eventHistoryOpen: Boolean = false,
     val moduleActivityOpen: Boolean = false,
     val adaptiveDetail: Boolean = false,
@@ -497,7 +516,7 @@ private data class ScreenRoute(
     val depth: Int
         get() = when {
             batteryDetail && batteryRankingOpen -> 3
-            eventHistoryOpen || moduleActivityOpen || batteryDetail || wakelockDetail || memDetail || processDetail -> 2
+            eventHistoryOpen || moduleActivityOpen || batteryDetail || wakelockDetail || memDetail || processDetail || storageDetail -> 2
             cpuDetail && (adaptiveDetail || screenOffDetail || cpusetDetail) -> 3
             cpuDetail -> 2
             destination == Destination.Settings && (diagnosticsDetail || adaptiveDetail) -> 2
@@ -517,6 +536,7 @@ private fun routeTitle(route: ScreenRoute): String? = when {
     route.destination == Destination.Modules && route.wakelockDetail -> "唤醒锁"
     route.destination == Destination.Modules && route.memDetail -> "内存管理"
     route.destination == Destination.Modules && route.processDetail -> "进程管理"
+    route.destination == Destination.Modules && route.storageDetail -> "储存管理"
     route.destination == Destination.Settings && route.diagnosticsDetail -> "诊断与日志"
     route.destination == Destination.Settings && route.adaptiveDetail -> "自适应性能管理"
     else -> null

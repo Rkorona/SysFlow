@@ -1,6 +1,6 @@
 id=sysflow
 name=SysFlow
-version=v0.2.3
-versionCode=203
+version=v0.3.0
+versionCode=300
 author=SysFlow contributors
-description=CPU and GPU tuning, adaptive performance management, memory bus controls and diagnostics for SysFlow.
+description=CPU / 内存 / 储存 / 进程管理与诊断（含 IO 吞吐、调度器与历史曲线）

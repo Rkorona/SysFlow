@@ -4,7 +4,7 @@ Unified system manager for rooted Android: a root **module** (Rust binary `sysfl
 enforcement/adaptive daemon and KernelSU WebUI) plus an **M3 Expressive APK** that is pure UI
 and never runs in the background.
 
-Current module version: `v0.2.3` (`module/module.prop`).
+Current module version: `v0.3.0` (`module/module.prop`).
 
 - Plan and decisions: [docs/development-plan.md](docs/development-plan.md)
 - Protocol: [docs/protocol.md](docs/protocol.md)
@@ -162,6 +162,28 @@ expansion contains any protected PID is rejected as a whole. Nothing here writes
 action cannot affect boot, drift or safe mode. See `docs/protocol.md` §3.25,
 `docs/process-module-plan.md` and `docs/modules/process.md`.
 
+## Storage module
+
+`core/sysflow-modules/src/storage/` puts capacity, block-device geometry, I/O throughput, the two
+queue tunables and maintenance verbs in one place. It participates in `snapshot` (capacity and
+boot-cumulative counters are cheap); throughput needs an interval and is a verb + 5-minute history.
+
+```sh
+sysflow storage get --pretty                    # capacity, device, scheduler, read_ahead, IO totals
+sysflow storage io --interval-ms 1000           # live read/write KB/s, IOPS, utilisation
+sysflow storage usage --path /data --budget-ms 3000   # top-level directories by allocated bytes
+sysflow storage trim                            # fstrim -v /data (one-shot, not persisted)
+sysflow storage set '{"storage.scheduler":"kyber"}' --persist
+sysflow storage set '{"storage.read_ahead_kb":1024}' --persist
+sysflow history storage --since 24h --step 1h
+```
+
+The tunables apply to the **physical** device behind `/data` (resolved through
+`/sys/block/<dm>/slaves/`), because device-mapper nodes have no I/O scheduler. Values are validated
+against the kernel's own option list before writing, read back, and dropped at boot if this kernel no
+longer accepts them. `storage usage` is time-bounded and reports `partial:true` rather than freezing.
+See `docs/protocol.md` §3.26, `docs/storage-module-plan.md` and `docs/modules/storage.md`.
+
 ## Adaptive control and enforcement
 
 The CPU page links to a dedicated adaptive-management screen with smart load tiers, thermal
@@ -239,7 +261,7 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 
 ```sh
 ./build-sysflow-module.sh
-# dist/sysflow-module-v0.2.3.zip (+ .sha256)
+# dist/sysflow-module-v0.3.0.zip (+ .sha256)
 ```
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the

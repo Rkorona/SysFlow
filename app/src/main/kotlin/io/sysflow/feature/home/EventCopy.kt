@@ -74,6 +74,8 @@ private val eventLabels = mapOf(
     "mem_pressure_recovered" to "内存压力已恢复",
     "mem_oom_kill" to "内核内存不足",
     "mem_setting_contested" to "内存设置被反复改回",
+    "storage_low_space" to "储存空间不足",
+    "storage_space_recovered" to "储存空间已恢复",
     "settings_applied" to "设置已更新",
     "settings_partially_applied" to "设置部分生效",
     "settings_apply_failed" to "设置写入失败",
@@ -226,6 +228,12 @@ fun activityDetail(event: SystemEventEntity): String {
         "corrupt_config_cleared" -> "损坏的配置备份已删除"
         "recovery_restored" -> "隔离的配置已恢复使用"
         "recovery_discarded" -> "隔离的配置已丢弃"
+        "storage_low_space" -> meta.number("used_pct")
+            ?.let { "存储空间已使用 ${it.roundPercent()}%，请清理空间" }
+            ?: "存储空间不足，请清理空间"
+        "storage_space_recovered" -> meta.number("used_pct")
+            ?.let { "存储空间使用率已回落到 ${it.roundPercent()}%" }
+            ?: "存储空间已恢复"
         "mem_pressure_high" -> "内存压力偏高，已持续 15 分钟" + psiDetail(meta)
         "mem_pressure_recovered" -> "内存压力已恢复正常" + psiDetail(meta)
         "mem_oom_kill" -> meta.number("count")?.roundPercent()?.takeIf { it > 0 }
