@@ -40,6 +40,9 @@ data class ScreenOffUiState(
     val loading: Boolean = true,
     val enabled: Boolean = false,
     val active: Boolean = false,
+    /** Reported by `daemon status`, not part of the CPU snapshot: liveness and screen detection. */
+    val daemonRunning: Boolean = false,
+    val screenState: String = "unknown",
     val policies: List<ScreenOffPolicy> = emptyList(),
     /** Policy id -> selected slider index; last index means unlimited. */
     val capIndices: Map<String, Int> = emptyMap(),

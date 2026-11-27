@@ -440,15 +440,33 @@ sysfs; exit safe mode and reboot (or explicitly apply the settings) after review
 `recovery clear` discards a valid backup; `recovery clear-corrupt` removes a malformed
 `config.json.corrupt` left behind by a damaged file.
 
-`daemon status` reports `running`, `implemented`, `enabled` and `interval_s`:
+`daemon status` reports `running`, `implemented`, `enabled`, `interval_s` and three optional display
+fields (`screen`, `screen_age_s`, `screen_checked_at`):
 
 ```json
-{"v":1,"ok":true,"data":{"running":false,"implemented":true,"enabled":true,"interval_s":10}}
+{"v":1,"ok":true,"data":{"running":false,"implemented":true,"enabled":true,"interval_s":10,"screen":"unknown","screen_age_s":null,"screen_checked_at":null}}
 ```
 
 `running` is whether a live daemon process passed the PID + `/proc/<pid>/cmdline` check, `enabled`
 is the persisted intent, and `implemented` is always `true` on this binary — it exists so a client
-talking to an older module can tell "not implemented" apart from "not running".
+talking to an older module can tell "not implemented" apart from "not running". The three display
+fields are **optional and backwards compatible**: older modules omit them entirely, and a client
+must treat a missing value as `unknown` / `null`.
+
+- `screen` is the daemon's most recent display detection: `"on"`, `"off"` or `"unknown"`. A missing
+  or corrupt snapshot is reported as `"unknown"`.
+- `screen_age_s` is the age in seconds of the last **successful framework answer**, computed at read
+  time (`u64` or `null` when there has never been one). The timestamp is persisted, so the age keeps
+  growing while detection is broken and after the daemon has stopped: a large value means "off and
+  healthy" can no longer be trusted.
+- `screen_checked_at` is the Unix second of the last detection poll (`u64` or `null` when none was
+  recorded).
+
+The daemon publishes these values to a runtime snapshot at `<data_dir>/daemon-screen.json`, flat
+next to `daemon.pid` and `guard_interval`. It writes `{"screen", "checked_at", "success_at"}` via a
+temp file plus `rename` (atomic, so a killed daemon never leaves a half-written file), throttled to
+5 s and forced immediately on a state change. `daemon status` runs in a separate CLI process and
+reads this file rather than querying the daemon directly.
 
 `daemon configure --enabled true` starts automatic drift repair and adaptive sampling; `--enabled
 false` stops it. Continuous guard requires boot-time apply to remain enabled. The interval may be set
@@ -1449,8 +1467,9 @@ items. `Envelope<T>` / `ProtocolError` are shared by every response.
 
 Generated types today: `ErrorCode`, `ItemType`, `Scope`, `Risk`, `ProtocolError`, `Caps`,
 `CapsData`, `SchemaItem`, `Schema`, `ApplyResult`, `SnapshotData`, `CheckData`, `VersionData`,
-`SafeStatus`, `HistoryData` (including the `points` field from §3.9), `DaemonStatus`. Two known gaps: `DaemonStatus` models only `running`
-and `implemented` — the CLI also returns `enabled` and `interval_s` — and there is no `BootStatus`
+`SafeStatus`, `HistoryData` (including the `points` field from §3.9), `DaemonStatus` (with the optional
+`screen`, `screen_age_s` and `screen_checked_at` fields). Two known gaps: the generated `DaemonStatus`
+still omits `enabled` and `interval_s` — the CLI also returns those — and there is no `BootStatus`
 type, so `boot status` is still parsed as `JsonObject`.
 
 ## 5. Compatibility

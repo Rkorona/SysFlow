@@ -168,18 +168,31 @@ fun ScreenOffScreen(
                     }
                     item(key = "save") {
                         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            if (state.active) {
-                                InfoPill(
+                            when {
+                                state.active && state.enabled && state.daemonRunning && state.screenState == "on" -> InfoCard(
+                                    text = "屏幕已点亮，正在等待恢复常规配置…",
+                                )
+                                state.active && state.enabled && state.daemonRunning -> InfoPill(
                                     text = "熄屏配置当前正在生效",
                                     container = MaterialTheme.colorScheme.tertiaryContainer,
                                     content = MaterialTheme.colorScheme.onTertiaryContainer,
                                 )
-                            } else if (state.enabled) {
-                                InfoPill(
+                                state.active && state.enabled -> InfoCard(
+                                    text = "熄屏配置标记为生效，但守护进程未运行，亮屏后可能未自动恢复——请检查模块服务",
+                                    error = true,
+                                )
+                                state.active -> InfoCard(
+                                    text = "熄屏配置标记已过期，但功能已关闭，保存一次开关即可清除",
+                                    error = true,
+                                )
+                                state.enabled -> InfoPill(
                                     text = "已启用，等待下一次熄屏",
                                     container = MaterialTheme.colorScheme.secondaryContainer,
                                     content = MaterialTheme.colorScheme.onSecondaryContainer,
                                 )
+                            }
+                            if (state.enabled && !state.daemonRunning) {
+                                InfoCard("守护进程未运行，屏幕状态变化不会被自动检测，熄屏限制可能无法自动启用或恢复。")
                             }
                             if (state.error != null) {
                                 InfoCard(state.error!!, error = true)

@@ -16,6 +16,11 @@
 //! An `unknown` reading is never a transition: the previous state is preserved and the next tick
 //! retries. Turning a failed `dumpsys` into "screen off" would toggle the screen-off CPU profile
 //! on a transient SELinux denial.
+//!
+//! One deliberate exception is the *stale* fallback: when the framework source stays unreadable for
+//! [`UNKNOWN_STALE_AFTER`] while a decision is cached, the detector moves to `On` — the safe
+//! direction. A screen-off profile left pinning an awake device is far worse than releasing it a
+//! few seconds early; the next confirmed `Off` re-applies it.
 
 use std::fs;
 use std::path::PathBuf;
@@ -50,6 +55,13 @@ const POWER_DUMP_TIMEOUT: Duration = Duration::from_secs(3);
 /// answer (or a missed transition) cannot pin the display state for the life of the process.
 const FRAMEWORK_RECHECK: Duration = Duration::from_secs(10);
 
+/// A framework source that stays unreadable for three full recheck windows must not pin a cached
+/// `Off` decision forever (a wedged binder or a SELinux denial can last far longer than a reboot).
+/// At that point the detector falls back to `On`: releasing a screen-off profile is always safe,
+/// while leaving one applied on an awake device is not. Ordinary `Unknown` answers are still never
+/// transitions — only a *timed-out* unknown triggers this one-way safety move.
+pub const UNKNOWN_STALE_AFTER: Duration = Duration::from_secs(FRAMEWORK_RECHECK.as_secs() * 3);
+
 /// Without a readable backlight node the framework is the only source; poll it faster while the
 /// display is off so a wake-up is noticed quickly.
 const FRAMEWORK_FAST_POLL: Duration = Duration::from_secs(2);
@@ -78,6 +90,17 @@ pub struct ScreenWatcher {
     /// Lower bound between framework calls; tests set it to zero so they can script answers.
     min_interval: Duration,
     power_source: PowerSource,
+    /// Last *successful* framework answer. Its age is the staleness of a cached decision: while a
+    /// profile is active, a framework that keeps failing cannot refresh this timestamp.
+    last_success: Option<Instant>,
+    /// How long `unknown` must persist before the safety fallback releases to `On`. Tests shorten it.
+    unknown_timeout: Duration,
+    /// The current `On` came from the stale-unknown fallback, not a real framework answer.
+    safety_on: bool,
+    /// Wall-clock timestamps persisted for `sysflow daemon status`. `success_at` only advances on a
+    /// real framework answer, so a growing age exposes a detection outage even while `running` is true.
+    last_success_ts: Option<u64>,
+    last_poll_ts: Option<u64>,
 }
 
 /// Where `dumpsys power` output comes from. Tests inject a scripted source so the parser and the
@@ -108,6 +131,11 @@ impl ScreenWatcher {
             off_streak: 0,
             min_interval: FRAMEWORK_MIN_INTERVAL,
             power_source: PowerSource::Command,
+            last_success: None,
+            unknown_timeout: UNKNOWN_STALE_AFTER,
+            safety_on: false,
+            last_success_ts: None,
+            last_poll_ts: None,
         }
     }
 
@@ -147,6 +175,34 @@ impl ScreenWatcher {
         self.last.unwrap_or(ScreenState::Unknown)
     }
 
+    /// Test hook: shorten the stale-unknown timeout so the safety net can be exercised on a host.
+    #[cfg(test)]
+    pub(crate) fn with_unknown_timeout(mut self, timeout: Duration) -> Self {
+        self.unknown_timeout = timeout;
+        self
+    }
+
+    /// Age of the last successful framework answer — the staleness behind the safety fallback and
+    /// the `screen_age_s` field of `daemon status`.
+    pub fn unknown_age(&self) -> Option<Duration> {
+        self.last_success.map(|at| at.elapsed())
+    }
+
+    /// True when the current `On` was forced by the stale-unknown safety fallback instead of a
+    /// real framework answer. The daemon uses it to log why a profile was released.
+    pub fn safety_on(&self) -> bool {
+        self.safety_on
+    }
+
+    /// Unix seconds of the last successful framework answer / last detection poll.
+    pub fn last_success_ts(&self) -> Option<u64> {
+        self.last_success_ts
+    }
+
+    pub fn last_poll_ts(&self) -> Option<u64> {
+        self.last_poll_ts
+    }
+
     /// Poll the display once.
     ///
     /// The backlight is a cheap *hint*: any change in the raw value — not merely crossing zero —
@@ -157,16 +213,35 @@ impl ScreenWatcher {
     pub fn detect(&mut self) -> ScreenState {
         let brightness = self.brightness();
         let now = Instant::now();
+        self.last_poll_ts = Some(crate::history::now_secs());
         let since_last = self.last_check.map(|checked| now.duration_since(checked));
         let min_ok = since_last.is_none_or(|elapsed| elapsed >= self.min_interval);
-        let interval = if brightness.is_none() && self.last == Some(ScreenState::Off) {
-            FRAMEWORK_FAST_POLL
-        } else {
-            FRAMEWORK_RECHECK
-        };
+        // While the safety fallback is in force, keep asking quickly so a real "off" can be
+        // confirmed (and the profile re-applied) within a few seconds.
+        let interval =
+            if self.safety_on || (brightness.is_none() && self.last == Some(ScreenState::Off)) {
+                FRAMEWORK_FAST_POLL
+            } else {
+                FRAMEWORK_RECHECK
+            };
         let due = since_last.is_none_or(|elapsed| elapsed >= interval);
         let changed = brightness != self.last_brightness;
-        let ask = min_ok && (self.last.is_none() || self.off_streak > 0 || changed || due);
+        let ask = min_ok
+            && (self.last.is_none() || self.off_streak > 0 || self.safety_on || changed || due);
+
+        // Safety net: a cached `Off` whose framework answer has grown older than the timeout must
+        // not pin a screen-off profile forever. Checked before the cache short-circuit so a wedged
+        // binder is noticed even on ticks that would not normally re-ask the framework.
+        if self.last == Some(ScreenState::Off)
+            && self
+                .last_success
+                .is_some_and(|at| now.duration_since(at) >= self.unknown_timeout)
+        {
+            self.off_streak = 0;
+            self.last = Some(ScreenState::On);
+            self.safety_on = true;
+            return ScreenState::On;
+        }
 
         if !ask {
             return self.last();
@@ -177,11 +252,17 @@ impl ScreenWatcher {
         match self.power_state() {
             Some(ScreenState::On) => {
                 // Releasing the profile is always safe, so "on" applies immediately.
+                self.last_success = Some(now);
+                self.safety_on = false;
+                self.last_success_ts = Some(crate::history::now_secs());
                 self.off_streak = 0;
                 self.last = Some(ScreenState::On);
                 ScreenState::On
             }
             Some(ScreenState::Off) => {
+                self.last_success = Some(now);
+                self.safety_on = false;
+                self.last_success_ts = Some(crate::history::now_secs());
                 self.off_streak = self.off_streak.saturating_add(1);
                 // The first observation is not a transition: there is no previous state to protect,
                 // and a wrong initial answer is corrected by the periodic recheck. Only flipping an
@@ -202,9 +283,10 @@ impl ScreenWatcher {
         }
     }
 
-    /// True while an "off" reading still needs confirmation, so the caller can poll again quickly.
+    /// True while an "off" reading still needs confirmation, or while the stale-unknown safety
+    /// fallback is waiting for a real answer, so the caller can poll again quickly.
     pub fn wants_fast_poll(&self) -> bool {
-        self.off_streak > 0
+        self.off_streak > 0 || self.safety_on
     }
 
     fn power_state(&self) -> Option<ScreenState> {
@@ -346,6 +428,7 @@ fn read_power_dump(timeout: Duration) -> Option<String> {
 mod tests {
     use super::*;
     use std::fs;
+    use std::thread;
 
     fn power_on() -> Option<String> {
         Some(ON.to_string())
@@ -548,5 +631,88 @@ mod tests {
             panic!("cached state must be reused")
         }));
         assert_eq!(watcher.detect(), ScreenState::On);
+    }
+
+    #[test]
+    fn stale_unknown_with_backlight_on_falls_back_to_on() {
+        let root = temp_root("stale-backlight-on");
+        let node = root.join("sys/class/backlight/panel");
+        fs::create_dir_all(&node).unwrap();
+        fs::write(node.join("brightness"), "800\n").unwrap();
+
+        let mut watcher = ScreenWatcher::with_script(Sysfs::new(&root), vec![Some(OFF), None])
+            .with_unknown_timeout(Duration::from_millis(60));
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        // Wake-up: the backlight jumps but dumpsys keeps failing. A single unknown is still not a
+        // transition, even though the cache says "off".
+        fs::write(node.join("brightness"), "900\n").unwrap();
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        assert!(!watcher.safety_on());
+        assert!(watcher.unknown_age().unwrap() < Duration::from_millis(60));
+
+        thread::sleep(Duration::from_millis(90));
+        assert_eq!(
+            watcher.detect(),
+            ScreenState::On,
+            "a timed-out framework must release the safe direction"
+        );
+        assert!(watcher.safety_on());
+        assert!(watcher.unknown_age().unwrap() >= Duration::from_millis(60));
+    }
+
+    #[test]
+    fn stale_unknown_without_backlight_falls_back_to_on() {
+        let root = temp_root("stale-no-backlight");
+        let mut watcher = ScreenWatcher::with_script(Sysfs::new(&root), vec![Some(OFF), None])
+            .with_unknown_timeout(Duration::from_millis(60));
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        watcher.last_check = None;
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        assert!(!watcher.safety_on());
+        thread::sleep(Duration::from_millis(90));
+        assert_eq!(watcher.detect(), ScreenState::On);
+        assert!(watcher.safety_on());
+        assert!(
+            watcher.wants_fast_poll(),
+            "a real 'off' must be re-confirmed quickly after a fallback"
+        );
+    }
+
+    #[test]
+    fn unknown_before_timeout_keeps_waiting() {
+        let root = temp_root("stale-not-yet");
+        let node = root.join("sys/class/backlight/panel");
+        fs::create_dir_all(&node).unwrap();
+        fs::write(node.join("brightness"), "800\n").unwrap();
+
+        let mut watcher = ScreenWatcher::with_script(Sysfs::new(&root), vec![Some(OFF), None])
+            .with_unknown_timeout(Duration::from_secs(5));
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        fs::write(node.join("brightness"), "900\n").unwrap();
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        assert!(!watcher.safety_on());
+        assert!(watcher.unknown_age().unwrap() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn confirmed_off_recovers_after_safety_fallback() {
+        let root = temp_root("stale-recover");
+        let mut watcher = ScreenWatcher::with_script(
+            Sysfs::new(&root),
+            vec![Some(OFF), None, Some(OFF), Some(OFF)],
+        )
+        .with_unknown_timeout(Duration::from_millis(40));
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        // Force one framework poll so the scripted failure is actually consumed.
+        watcher.last_check = None;
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        thread::sleep(Duration::from_millis(60));
+        assert_eq!(watcher.detect(), ScreenState::On);
+        assert!(watcher.safety_on());
+        // First real "off" is unconfirmed because there is an established state to protect; the
+        // second one re-applies the profile. Fast polling is what makes this happen in seconds.
+        assert_eq!(watcher.detect(), ScreenState::On);
+        assert_eq!(watcher.detect(), ScreenState::Off);
+        assert!(!watcher.safety_on());
     }
 }

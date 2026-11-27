@@ -160,7 +160,10 @@ data class HistoryData(
 @Serializable
 data class DaemonStatus(
     val running: Boolean,
-    val implemented: Boolean
+    val implemented: Boolean,
+    val screen: String? = null,
+    val screen_age_s: Long? = null,
+    val screen_checked_at: Long? = null
 )
 
 /** Module id -> capability. */

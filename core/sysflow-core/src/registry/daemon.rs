@@ -15,6 +15,7 @@
 //!   screen state that was current at sample time so clients can split drain by display state.
 
 use std::collections::BTreeMap;
+use std::fs;
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -50,6 +51,9 @@ struct LoopState {
     screen_state: ScreenState,
     /// Last screen-transition error, so a persistent failure is logged once instead of every second.
     screen_error: Option<String>,
+    /// Wall-clock second of the last published `daemon-screen.json` snapshot. The status command is
+    /// a different process, so the loop publishes its detection there (throttled to 5 s).
+    last_status_write: Option<u64>,
 }
 
 impl LoopState {
@@ -61,7 +65,17 @@ impl LoopState {
             screen: ScreenWatcher::new(registry.ctx.sysfs.clone()),
             screen_state: ScreenState::Unknown,
             screen_error: None,
+            last_status_write: None,
         }
+    }
+}
+
+/// Wire name of a display state in `daemon-screen.json` and `daemon status`.
+fn screen_name(state: ScreenState) -> &'static str {
+    match state {
+        ScreenState::On => "on",
+        ScreenState::Off => "off",
+        ScreenState::Unknown => "unknown",
     }
 }
 
@@ -83,6 +97,58 @@ impl Registry {
         Some(pid)
     }
 
+    /// Runtime snapshot of the daemon's latest display detection. Flat next to `daemon.pid` and
+    /// `guard_interval`, because it describes the daemon process rather than a module's state.
+    fn screen_status_path(&self) -> std::path::PathBuf {
+        self.ctx.data_dir.join("daemon-screen.json")
+    }
+
+    /// Publish the watchdog's view of the display so `daemon status` can tell "off and healthy"
+    /// from "active but detection unavailable / daemon gone". The age of the successful answer
+    /// keeps growing on its own while detection is broken, because the timestamp is persisted.
+    fn publish_screen_status(&self, state: &mut LoopState, force: bool) {
+        let now = crate::history::now_secs();
+        if !force
+            && state
+                .last_status_write
+                .is_some_and(|at| now.saturating_sub(at) < 5)
+        {
+            return;
+        }
+        state.last_status_write = Some(now);
+        let payload = json!({
+            "screen": screen_name(state.screen_state),
+            "checked_at": state.screen.last_poll_ts(),
+            "success_at": state.screen.last_success_ts(),
+        });
+        let path = self.screen_status_path();
+        // Atomic replace: a killed daemon must never leave a half-written snapshot behind.
+        let tmp = path.with_extension("json.tmp");
+        if fs::write(&tmp, payload.to_string()).is_ok() {
+            let _ = fs::rename(&tmp, path);
+        }
+    }
+
+    /// Latest published detection, read by `daemon status` in a separate CLI process. Missing or
+    /// corrupt snapshots are reported as `unknown` with no timestamps.
+    fn read_screen_status(&self) -> (String, Option<u64>, Option<u64>) {
+        let Some(text) = fs::read_to_string(self.screen_status_path()).ok() else {
+            return ("unknown".into(), None, None);
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            return ("unknown".into(), None, None);
+        };
+        let screen = value
+            .get("screen")
+            .and_then(Value::as_str)
+            .filter(|name| matches!(*name, "on" | "off" | "unknown"))
+            .unwrap_or("unknown")
+            .to_string();
+        let checked_at = value.get("checked_at").and_then(Value::as_u64);
+        let success_at = value.get("success_at").and_then(Value::as_u64);
+        (screen, checked_at, success_at)
+    }
+
     /// Guard interval in seconds, clamped to the documented 2–120 s range.
     fn guard_interval_secs(&self) -> u64 {
         std::fs::read_to_string(self.ctx.data_dir.join("guard_interval"))
@@ -98,11 +164,21 @@ impl Registry {
             && !cfg.safe.safe_mode
             && !safe::rescue_marker_present(&self.ctx)
             && !self.ctx.data_dir.join("no_enforce").exists();
+        let (screen, checked_at, success_at) = self.read_screen_status();
+        // Age is computed at read time: if the daemon died, the persisted timestamp stops advancing
+        // and the number grows, which is exactly what a client needs to distinguish stale detection
+        // from a healthy "off" decision.
+        let screen_age_s = success_at
+            .filter(|at| *at <= crate::history::now_secs())
+            .map(|at| crate::history::now_secs() - at);
         Ok(json!({
             "running": self.daemon_pid().is_some(),
             "implemented": true,
             "enabled": enabled,
             "interval_s": self.guard_interval_secs(),
+            "screen": screen,
+            "screen_age_s": screen_age_s,
+            "screen_checked_at": checked_at,
         }))
     }
 
@@ -286,8 +362,10 @@ impl Registry {
     /// One pass of the scheduler. Screen detection runs first because both the tick delay and the
     /// sampling context depend on it.
     fn daemon_tick(&self, state: &mut LoopState) {
+        let previous = state.screen_state;
         state.screen_state = state.screen.detect();
         self.screen_profile_tick(state);
+        self.publish_screen_status(state, previous != state.screen_state);
         if !self.ctx.data_dir.join("no_enforce").exists() {
             let guard = Duration::from_secs(self.guard_interval_secs());
             let due = state
@@ -339,6 +417,9 @@ impl Registry {
         if want == active {
             return;
         }
+        // A release forced by the stale-unknown safety net deserves its own warning: the display
+        // was not *observed* as on, the detector simply stopped trusting its last "off" answer.
+        let fallback = active && !want && state.screen.safety_on();
         match self.set("cpu", json!({ "cpu.screen_off_active": want }), false) {
             Ok(_) => {
                 state.screen_error = None;
@@ -346,6 +427,36 @@ impl Registry {
                     "screen transition state={} -> screen_off_active={want}",
                     if want { "off" } else { "on" }
                 ));
+                if fallback {
+                    let age = state
+                        .screen
+                        .unknown_age()
+                        .map(|age| age.as_secs())
+                        .unwrap_or(0);
+                    self.log.warn(&format!(
+                        "screen detection unavailable for {}s; released screen-off profile as a safety net",
+                        age
+                    ));
+                    self.emit_event(
+                        NewSystemEvent::new(
+                            "display",
+                            "power",
+                            "screen_detection_fallback",
+                            "warning",
+                            "Screen-off profile released after detection outage",
+                        )
+                        .message(
+                            "dumpsys power stayed unreadable; normal CPU limits were restored until the display is confirmed off.",
+                        )
+                        .metadata(json!({
+                            "reason": "framework_unknown_timeout",
+                            "unknown_age_s": age,
+                            "screen": screen_name(state.screen_state),
+                        }))
+                        .dedupe("display.screen_detection_fallback", 300),
+                    );
+                    self.publish_screen_status(state, true);
+                }
                 self.emit_display_event(want);
             }
             Err(e) => self.report_screen_error(state, &format!("apply screen-off profile: {e}")),
@@ -535,4 +646,181 @@ fn daemon_binary_is_stale(pid: u32) -> bool {
         }
     }
     current_meta.modified().ok() > running_meta.modified().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ctx::Ctx;
+    use crate::module::{ApplyResult, Caps, Module};
+    use crate::schema::{ItemType, Schema, SchemaItem};
+    use crate::sysfs::Sysfs;
+    use serde_json::{Map, Value};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+
+    const OFF: &str = "Power Manager State:\n  mWakefulness=Asleep\n  mIsInteractive: false\n";
+
+    fn temp_ctx(name: &str) -> (std::path::PathBuf, Ctx) {
+        let dir =
+            std::env::temp_dir().join(format!("sysflow-daemon-{}-{name}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let ctx = Ctx {
+            data_dir: dir.clone(),
+            module_dir: dir.clone(),
+            sysfs: Sysfs::new(&dir),
+        };
+        (dir, ctx)
+    }
+
+    /// A CPU stand-in that only owns the two screen-off flags, so `screen_profile_tick` can be
+    /// driven on a host without a real kernel tree.
+    struct FakeCpu {
+        active: Arc<Mutex<bool>>,
+    }
+
+    impl Module for FakeCpu {
+        fn id(&self) -> &'static str {
+            "cpu"
+        }
+        fn probe(&self) -> Caps {
+            Caps::supported(&[])
+        }
+        fn schema(&self) -> Schema {
+            Schema {
+                module: "cpu".into(),
+                supported: true,
+                items: vec![
+                    SchemaItem::new("cpu.screen_off", ItemType::Readonly),
+                    SchemaItem::new("cpu.screen_off_active", ItemType::Bool),
+                ],
+            }
+        }
+        fn collect(&self, keys: Option<&[String]>) -> Result<Value> {
+            let wanted = |key: &str| keys.is_none_or(|keys| keys.iter().any(|k| k == key));
+            let mut out = Map::new();
+            if wanted("cpu.screen_off") {
+                out.insert("cpu.screen_off".into(), json!(true));
+            }
+            if wanted("cpu.screen_off_active") {
+                out.insert(
+                    "cpu.screen_off_active".into(),
+                    json!(*self.active.lock().unwrap()),
+                );
+            }
+            Ok(Value::Object(out))
+        }
+        fn apply(&self, req: &Map<String, Value>) -> Result<ApplyResult> {
+            if let Some(want) = req.get("cpu.screen_off_active").and_then(Value::as_bool) {
+                *self.active.lock().unwrap() = want;
+            }
+            Ok(ApplyResult::from_readback(req, req.clone()))
+        }
+    }
+
+    fn fixture(name: &str, backlight: Option<u64>) -> (Registry, Arc<Mutex<bool>>, LoopState) {
+        let (dir, ctx) = temp_ctx(name);
+        if let Some(brightness) = backlight {
+            let node = dir.join("sys/class/backlight/panel");
+            fs::create_dir_all(&node).unwrap();
+            fs::write(node.join("brightness"), format!("{brightness}\n")).unwrap();
+        }
+        let active = Arc::new(Mutex::new(true));
+        let reg = Registry::new(
+            ctx,
+            vec![Box::new(FakeCpu {
+                active: active.clone(),
+            })],
+        );
+        let mut state = LoopState::new(&reg);
+        state.screen = ScreenWatcher::with_script(reg.ctx().sysfs.clone(), vec![Some(OFF), None])
+            .with_unknown_timeout(Duration::from_millis(60));
+        (reg, active, state)
+    }
+
+    #[test]
+    fn active_profile_is_released_when_backlight_is_on_and_detection_stales() {
+        let (reg, active, mut state) = fixture("release-backlight", Some(800));
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(
+            *active.lock().unwrap(),
+            "confirmed off keeps the profile active"
+        );
+        thread::sleep(Duration::from_millis(90));
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(
+            !*active.lock().unwrap(),
+            "stale unknown must release the profile even though the framework never said 'on'"
+        );
+    }
+
+    #[test]
+    fn active_profile_is_released_without_backlight_after_timeout() {
+        let (reg, active, mut state) = fixture("release-no-backlight", None);
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(*active.lock().unwrap());
+        thread::sleep(Duration::from_millis(90));
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(!*active.lock().unwrap());
+    }
+
+    #[test]
+    fn active_profile_is_kept_before_the_timeout() {
+        let (reg, active, mut state) = fixture("keep-before-timeout", Some(800));
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(*active.lock().unwrap());
+        // One failed answer is not enough — no sleeping, so the fallback cannot have fired.
+        state.screen_state = state.screen.detect();
+        reg.screen_profile_tick(&mut state);
+        assert!(
+            *active.lock().unwrap(),
+            "transient unknown must not release"
+        );
+        assert!(!state.screen.safety_on());
+    }
+
+    #[test]
+    fn daemon_status_reports_published_screen_detection() {
+        let (_dir, ctx) = temp_ctx("status");
+        let reg = Registry::new(ctx, vec![]);
+        let status = reg.daemon_status().unwrap();
+        assert_eq!(status["screen"], "unknown");
+        assert!(status["screen_age_s"].is_null());
+        assert!(status["screen_checked_at"].is_null());
+
+        let now = crate::history::now_secs();
+        fs::write(
+            reg.screen_status_path(),
+            json!({ "screen": "off", "checked_at": now, "success_at": now - 5 }).to_string(),
+        )
+        .unwrap();
+        let status = reg.daemon_status().unwrap();
+        assert_eq!(status["screen"], "off");
+        assert_eq!(status["screen_age_s"], 5);
+        assert_eq!(status["screen_checked_at"], now);
+
+        // A corrupt snapshot degrades to unknown instead of failing the whole status command.
+        fs::write(reg.screen_status_path(), "not json").unwrap();
+        let status = reg.daemon_status().unwrap();
+        assert_eq!(status["screen"], "unknown");
+        assert!(status["screen_age_s"].is_null());
+    }
+
+    #[test]
+    fn loop_publishes_the_detection_snapshot() {
+        let (reg, _active, mut state) = fixture("publish", Some(800));
+        state.screen_state = state.screen.detect();
+        reg.publish_screen_status(&mut state, true);
+        let text = fs::read_to_string(reg.screen_status_path()).unwrap();
+        let snapshot: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(snapshot["screen"], "off");
+        assert!(snapshot["checked_at"].is_u64());
+        assert!(snapshot["success_at"].is_u64());
+    }
 }

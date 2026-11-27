@@ -59,8 +59,19 @@ battery / PSI hysteresis on its configured interval; it does not depend on the A
 - **cpuset root**: Android's `/dev/cpuset` is used. A cpuset write naming an offline core fails, so
   the requested set is intersected with `possible` and the currently online cores.
 - **DDR/LLCC** `bus_dcvs` is chipset specific; the item disappears when the node is missing.
-- **Screen-off**: `dumpsys power` formats differ (`mIsInteractive` vs `mWakefulness`); unknown output
-  is never treated as "off". The profile saves and restores the pre-off range and cores.
+- **Screen-off and stale-detection fallback**: `dumpsys power` formats differ (`mIsInteractive` vs
+  `mWakefulness`); an ordinary `unknown` output is never a transition — the last decision is kept and
+  the next tick retries. The profile saves and restores the pre-off range and cores. One deliberate
+  exception is a *stale cached `Off`*: when no successful framework answer has arrived for at least
+  30 s (3 × the 10 s `FRAMEWORK_RECHECK`), the detector switches to the safe direction `On` and
+  releases the profile regardless of whether a backlight node exists — a non-zero backlight alone is
+  not proof of "on", because some ROMs keep it lit for the always-on display while the framework is
+  asleep. A backlight change only triggers an earlier framework re-check; a successful framework
+  answer of `on` releases the profile immediately. The release writes a `warn` log and emits a
+  `screen_detection_fallback` event (category `power`, warning, dedupe key
+  `display.screen_detection_fallback`, 300 s), with `reason: framework_unknown_timeout` and
+  `unknown_age_s` in metadata. A genuine `Off` still needs two consecutive framework answers before
+  the profile is re-applied; ordinary `unknown` is never a transition.
 - **Thermal**: millidegree and whole-degree zones are both accepted. CPU/GPU/SoC-labelled zones
   other than `trip` feed adaptive control; `cpu.thermal_sensors_all` and `cpu.cooling_devices`
   expose the broader read-only diagnostic view.

@@ -243,6 +243,9 @@ fn defs() -> Vec<Def> {
             fields: vec![
                 field("running", BOOL),
                 field("implemented", BOOL),
+                optional("screen", STR, "Last display state the daemon observed: on | off | unknown."),
+                optional("screen_age_s", LONG, "Seconds since its last successful framework answer; null when none."),
+                optional("screen_checked_at", LONG, "Unix seconds of its last detection poll."),
             ],
         },
     ]

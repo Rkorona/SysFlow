@@ -11,9 +11,12 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 class ScreenOffViewModel(private val client: SysFlowClient) : ViewModel() {
@@ -160,7 +163,16 @@ class ScreenOffViewModel(private val client: SysFlowClient) : ViewModel() {
         val schema = client.schema("cpu")
         val snapshot = client.snapshot()
         val safe = client.safeStatus()
-        val parsed = parseScreenOffState(schema, snapshot).copy(safeMode = safe.safe_mode)
+        // Older module binaries may not report daemon status; that must not break config reads.
+        val daemon = runCatching { client.daemonStatus() }.getOrNull() ?: JsonObject(emptyMap())
+        val daemonRunning = daemon["running"]?.jsonPrimitive?.booleanOrNull ?: false
+        val screenState = daemon["screen"]?.jsonPrimitive?.content
+            ?.takeIf { it == "on" || it == "off" || it == "unknown" } ?: "unknown"
+        val parsed = parseScreenOffState(schema, snapshot).copy(
+            safeMode = safe.safe_mode,
+            daemonRunning = daemonRunning,
+            screenState = screenState,
+        )
         _state.update { previous ->
             val sameTopology = previous.policies.map { it.id to it.cpus } == parsed.policies.map { it.id to it.cpus } &&
                 previous.coreCount == parsed.coreCount

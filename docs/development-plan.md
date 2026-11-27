@@ -186,7 +186,8 @@ sysflow/
 │  ├─ event-system.md             # 开放式系统事件契约
 │  ├─ webui-console.md            # 模块救援控制台说明
 │  ├─ mem-module-plan.md          # 内存模块交付计划与逐 Step 记录
-│  ├─ wakelock-hardening-plan.md  # 唤醒锁硬化（P0–P3）完成记录
+│  ├─ archive/
+│  │  └─ wakelock-hardening-plan.md  # 唤醒锁硬化（P0–P3）完成记录（已归档）
 │  └─ modules/                    # sysfs 路径与设备差异记录（cpu.md、battery.md、wakelock.md、mem.md）
 ├─ core/                          # Rust workspace（crate version 0.3.2，与模块包 v0.3.3 不同；前者取自 Cargo.toml，后者取自 module.prop）
 │  ├─ Cargo.toml
@@ -465,7 +466,7 @@ pub trait Module: Send + Sync {
   - `events/`：开放式系统事件单文件期刊与 `.last_prune_ms`。
   - `history/<module>.jsonl`：守护进程写入的时序采样（`battery` 60 s、`wakelock` / `mem` 300 s，30 天 / 20 000 行保留）。
   - 60 秒查询缓存：`state/battery_apps.json`、`state/battery_health.json`、`state/wakelock_apps.json`、`state/wakelock_held.json`、`state/wakelock_wakeup.json`、`state/mem_apps.json`、`state/mem_breakdown.json`；另有 10 分钟的 `state/mem_packages.json`（UID→包名）。
-  - `daemon.pid`、`guard_interval`（2–120 s）、`no_enforce`。
+  - `daemon.pid`、`guard_interval`（2–120 s）、`no_enforce`、`daemon-screen.json`（守护进程最近一次屏幕检测结果的原子快照，5 s 节流；`daemon status` 读取它报 `screen` / `screen_age_s` / `screen_checked_at`）。
 
 ### 6.3 模块打包
 
@@ -783,6 +784,7 @@ PSS 排行与单应用明细、两个滑块（范围取自 `schema`，保存才 
 - 模块升级不会自动重启守护进程（运行中的进程持有旧 inode），因此 `customize.sh` 会在安装时停止旧守护，`daemon start` 也会比对 `/proc/<pid>/exe` 与磁盘二进制并在不一致时重启。
 - **熄屏切换已并入 daemon**（`core/sysflow-core/src/screen.rs`）：每轮以背光亮度做廉价变化检测，但**亮度原始值变化**（而不仅是 0/非 0 跳变）就会用 `dumpsys power`（3 秒超时）复核，另有 10 秒周期复核与 2 秒最小间隔，随后切换 `cpu.screen_off_active` 并发送 `display.*` 事件；`unknown` 不视为转换。
 - **熄屏判定要二次确认**：亮屏立即释放（释放永远安全），灭屏需连续两次框架答案（≥2 秒）才应用，避免唤醒瞬间一次残留 `Dozing` 就把亮屏状态压成熄屏；每次转换写入 `screen transition state=… -> screen_off_active=…` 日志，写入失败会发 `screen_transition_failed` warning 事件；daemon 启动与停止都先释放残留的熄屏配置（`state/cpu.json` 里的 `screen_active` 会被后续任何 apply 重新应用，因此不能跨重启继承）。亮屏 5 秒、熄屏或待确认 1 秒轮询，且不超过守护间隔。
+- **检测失灵时向安全方向兜底**：缓存的 `Off` 若最近一次成功框架应答已超过 30 秒（3 × `FRAMEWORK_RECHECK` 的 10 秒），探测器强制切到 `On` 并释放熄屏配置（有无背光节点均按该阈值回落；背光变化只提前触发框架复核，框架成功应答 `on` 时才立即释放，非零背光本身不当作亮屏，因为部分 ROM 的 AOD 会保持背光而框架已休眠），写 `warn` 日志并发 `screen_detection_fallback` warning 事件（dedupe 300 s）；普通 `unknown` 仍不是转换，真实的 `Off` 仍需两次确认才能回切，下一次确认的 `Off` 会重新应用配置。检测状态以 `daemon-screen.json` 快照发布给 `daemon status`。
 - **采样记录屏幕状态**：`history` 写入时在行内附带 `"screen":1|0`（无法判定时省略），`sysflow history` 将其作为 `screen` 序列返回，客户端据此拆分亮屏/熄屏掉电。
 
 **待补**：
