@@ -277,9 +277,14 @@ ANDROID_HOME=$ANDROID_SDK_ROOT ./gradlew :app:assembleDebug
 # dist/sysflow-module-<version>.zip (+ .sha256)
 ```
 
-The version comes from `module/module.prop`. The current working tree contains only
-`dist/sysflow-module-v0.3.3.zip.sha256`; the zip itself is a build/release artifact produced by the
-script above.
+The version comes from `module/module.prop` and is validated by `tools/check-version.sh`. Both
+`dist/sysflow-module-<version>.zip` and its `.sha256` are build/release artifacts: `dist/` is
+git-ignored and nothing from it is checked in.
+
+Packaging is reproducible: `tools/pack-module.sh` pins the archive timestamp
+(`SOURCE_DATE_EPOCH`, defaulting to the last commit time), sorts entries and normalizes
+permissions, so the same ARM64 binary at the same commit produces the same SHA256. It only needs
+`python3`; no `zip` binary is required.
 
 The script installs `cargo-ndk` and the `aarch64-linux-android` target when missing, builds the
 ARM64 release binary, checks the static WebUI assets and packages the zip. Equivalent manual steps:

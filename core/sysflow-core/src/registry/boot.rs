@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use serde_json::{json, Map, Value};
 
+use crate::config::Config;
 use crate::error::{Error, Result};
 use crate::event::NewSystemEvent;
 use crate::safe::{self, BootDecision};
@@ -164,8 +165,9 @@ impl Registry {
         self.boot_status()
     }
 
-    fn apply_walt_guard_only(&self, modules: &Map<String, Value>) -> Result<Value> {
-        let settings = modules
+    fn apply_walt_guard_only(&self, cfg: &Config) -> Result<Value> {
+        let settings = cfg
+            .modules
             .get("cpu")
             .and_then(Value::as_object)
             .cloned()
@@ -173,8 +175,10 @@ impl Registry {
         let Some(enabled) = settings.get("cpu.walt_guard").and_then(Value::as_bool) else {
             return Ok(json!({ "skipped": "boot_disabled", "walt_guard": "not_configured" }));
         };
-        if safe::rescue_marker_present(&self.ctx) {
-            return Ok(json!({ "skipped": "disable_tuning", "walt_guard": "not_applied" }));
+        // The caller (`apply_boot`) already gated the rescue marker and safe mode; going through
+        // `block_reason` keeps this safety net in one place and reports the same reason strings.
+        if let Some(reason) = safe::block_reason(cfg, &self.ctx) {
+            return Ok(json!({ "skipped": reason, "walt_guard": "not_applied" }));
         }
         let module = match self.find_supported("cpu") {
             Ok(module) => module,
@@ -246,19 +250,21 @@ impl Registry {
     }
 
     pub fn apply_boot(&self, no_delay: bool) -> Result<Value> {
+        // Rescue marker first, before the config is loaded: a config that cannot be loaded
+        // (missing/corrupt/newer than supported) must not pre-empt the user's recovery marker.
         if safe::rescue_marker_present(&self.ctx) {
             self.log
                 .warn("apply-boot skipped: disable_tuning marker present");
-            return Ok(json!({ "skipped": "disable_tuning" }));
+            return Ok(json!({ "skipped": safe::RESCUE_REASON }));
         }
         let cfg = self.store.load()?;
-        if cfg.safe.safe_mode {
-            return Ok(json!({ "skipped": "safe_mode" }));
+        if let Some(reason) = safe::block_reason(&cfg, &self.ctx) {
+            return Ok(json!({ "skipped": reason }));
         }
         if !cfg.boot.enabled {
             // SoCFlow's WALT guard is independent of ordinary boot-time tuning. Preserve that
             // behavior when users disable the main boot-apply switch.
-            return self.apply_walt_guard_only(&cfg.modules);
+            return self.apply_walt_guard_only(&cfg);
         }
         if !no_delay && cfg.boot.delay_s > 0 {
             std::thread::sleep(Duration::from_secs(u64::from(cfg.boot.delay_s)));
@@ -269,7 +275,7 @@ impl Registry {
             let mut isolated = Vec::new();
             // After repeated unconfirmed boots, isolate the persisted tuning profile instead of
             // deleting it. The user can explicitly restore or discard it from Recovery.
-            if decision == BootDecision::Skip("safe_mode")
+            if decision == BootDecision::Skip(safe::SAFE_MODE_REASON)
                 && c.safe.safe_mode
                 && c.recovery_backup.is_none()
                 && !c.modules.is_empty()
@@ -281,7 +287,7 @@ impl Registry {
             Ok((decision, isolated, c.safe.boot_count, c.safe.threshold))
         })?;
         if let BootDecision::Skip(reason) = decision {
-            if reason == "safe_mode" && !was_safe_mode {
+            if reason == safe::SAFE_MODE_REASON && !was_safe_mode {
                 let message = if isolated_modules.is_empty() {
                     "Repeated unconfirmed boots triggered automatic safe mode.".to_string()
                 } else {

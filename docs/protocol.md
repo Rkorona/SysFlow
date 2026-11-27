@@ -42,7 +42,7 @@ Data directory: `/data/adb/sysflow/` (`config.json`, `log/`, `events/`, and modu
 | `invalid_arg` | bad module, key or value | revert the control, show message |
 | `busy` | resource or config lock in use | retry shortly |
 | `io` | read/write failed | show message, link to log |
-| `safe_mode` | tuning disabled by safe mode | read-only banner + "exit safe mode" |
+| `safe_mode` | tuning disabled by the safety state (safe mode or rescue marker); `msg` names the real cause | read-only banner + "exit safe mode" |
 
 ## 3. Commands
 
@@ -100,8 +100,10 @@ client can put in a 2 s snapshot poll.
 ```
 
 `sysflow_version` is the crate version from `core/Cargo.toml` (currently `0.3.2`), while the module
-package version comes from `module/module.prop` (currently `v0.3.3`) for the module manager; the two
-are not currently in sync.
+package version comes from `module/module.prop` (currently `v0.3.3`) and is what the module manager
+displays and installs. The two are deliberately independent version lines — the crate tracks the
+CLI / protocol binary, the module package tracks the flashable zip — so they are not expected to
+match, and a client must not derive one from the other.
 
 ### 3.2 info
 
@@ -119,7 +121,7 @@ Android properties are empty strings; `kernel_release` is read from `uname -r`.
 
 ```json
 {"v":1,"ok":true,"data":{
-  "sysflow_version":"0.2.2","protocol":1,"safe_mode":false,
+  "sysflow_version":"0.3.2","protocol":1,"safe_mode":false,
   "modules":{
     "cpu":{"supported":true,"features":["online","max_freq","min_freq","cur_freq","clusters",
            "time_in_state","load","governor","hw_range","gpu","walt","walt_guard","mem_boost",
@@ -132,6 +134,9 @@ Android properties are empty strings; `kernel_release` is read from `uname -r`.
   }
 }}
 ```
+
+`sysflow_version` in this example is illustrative: at run time it is the crate version from
+`core/Cargo.toml` at build time (§3.1), never a protocol constant.
 
 `features` are free-form strings owned by each module, not a protocol enum: clients must treat an
 unknown feature as "advertised by a newer module" and ignore it. The battery strings are the present
@@ -236,12 +241,14 @@ before anything is written. The reply is the **read-back** state, not an echo:
   remain persisted even under temporary live capping or kernel drift. `apply-boot` re-applies
   the saved requests at boot.
 - Before the first change to an item, its current value is saved as the default snapshot.
-- `set` fails with `safe_mode` while safe mode is on.
+- `set` fails with `safe_mode` while safe mode is on. The out-of-band rescue marker does **not** block
+  `set`: manual tuning stays available while automatic writes are paused (§3.13).
 
 ### 3.8 reset
 
-`sysflow <module> reset` restores the default snapshot through the module (allowed in safe
-mode), then drops the module's persisted settings.
+`sysflow <module> reset` restores the default snapshot through the module (allowed in safe mode and
+with the rescue marker present — manual recovery is never gated), then drops the module's persisted
+settings.
 
 ```json
 {"v":1,"ok":true,"data":{"restored":{"mock.level":50},"mismatch":[]}}
@@ -375,7 +382,7 @@ schema items, so a client can hide or group them without a separate protocol:
 | `cpu.screen_off.max_freq` | `int_range` cluster (0 = no cap) | per-cluster cap while the screen is off; positive values are validated against that policy's hardware min/max and snapped down to a supported live frequency |
 | `cpu.screen_off.freq_table` | readonly / cluster | raw `scaling_available_frequencies`; empty/one-entry tables tell the UI to generate SoCFlow-compatible 24-step choices |
 | `cpu.screen_off.cores` | `bool_list` global | extra cores to keep offline while the screen is off |
-| `cpu.screen_off_active` | `bool` global, not persisted | runtime switch; only the enforcement daemon sets it, from a confirmed display transition (see §3.13) |
+| `cpu.screen_off_active` | `bool` global, not persisted | runtime switch; only the enforcement daemon sets it, from a confirmed display transition or a safety-gate rollback (§3.13) |
 | `cpu.screen_off_saved_online` | readonly / global (`count` CPUs) | pre-screen-off online baseline while the profile is active; includes currently-offline cores so the UI can still edit selections safely |
 | `cpu.adaptive` | `bool` global | enable the adaptive cap controller |
 | `cpu.adaptive.*` | `bool` / `int_range` global | 4 strategy switches, 20 threshold/cap/hysteresis params (see `docs/modules/cpu.md`) |
@@ -394,9 +401,11 @@ with `<data_dir>/state/cpu.lock`. Deleting both while no CLI is running is safe.
 
 The module-owned enforcement daemon runs independently of the APK. At the configured interval
 (default 10 seconds, range 2–120), it repairs drift in persisted settings and advances the adaptive
-CPU controller even when no static setting has drifted. Each round it also compares every module's
-`sample_interval()` and appends an overdue `sample()` to `history/<module>.jsonl` (§3.9). Sampling is
-best-effort: a failing sample only logs and never disturbs drift repair or the adaptive controller.
+CPU controller even when no static setting has drifted — unless the safety gate is closed, in which
+case those automatic writes pause while read-only sampling continues (§3.13). Each round it also
+compares every module's `sample_interval()` and appends an overdue `sample()` to
+`history/<module>.jsonl` (§3.9). Sampling is best-effort: a failing sample only logs and never
+disturbs drift repair or the adaptive controller.
 
 ### 3.12 check
 
@@ -414,6 +423,11 @@ live read-back and writes nothing:
 A module whose `collect` fails is reported in `errors` and does not stop the others. Dynamic CPU
 caps (adaptive / screen-off) are expected to make the live max lower than the persisted static max,
 so those keys are not reported while the controller is active.
+
+`check` is a read-only diagnostic and is deliberately **not** subject to the safety gate: it runs in
+safe mode and with the rescue marker present, because it only compares persisted settings with live
+read-back and writes nothing. It never advances daemon state or history sampling, and a config that
+cannot be loaded surfaces as the normal `io` / `busy` error instead of a skipped result.
 
 ### 3.13 boot, recovery, daemon and safe mode
 
@@ -435,10 +449,25 @@ status` answers those, so each fact has exactly one owner.
  "has_corrupt_config":false,"safe_mode":false,"threshold":3}}
 ```
 
+`threshold` is the safe-mode boot threshold as the boot logic uses it, i.e. normalised to at least 1
+at config load (see `safe-mode status` below), not the raw hand-edited value.
+
 `recovery restore` restores the backup to the active configuration but does not immediately write
-sysfs; exit safe mode and reboot (or explicitly apply the settings) after reviewing it.
+sysfs; exit safe mode, remove any rescue marker, and reboot (or explicitly apply the settings) after
+reviewing it.
 `recovery clear` discards a valid backup; `recovery clear-corrupt` removes a malformed
 `config.json.corrupt` left behind by a damaged file.
+
+Config loading is part of the contract, because "the config cannot be read" has two different
+answers:
+
+- A **malformed** `config.json` (unparseable JSON) is *not* an error: the file is moved aside as
+  `config.json.corrupt` and the command continues on defaults. There is no trustworthy persisted
+  value to enforce anyway; `recovery status.has_corrupt_config` / `recovery clear-corrupt` expose and
+  clear the leftover. This is a deliberate degradation, **not** a fail-safe block.
+- A **hard load failure** — I/O error, a `version` newer than this binary, or a config lock
+  timeout — is returned as `io` / `busy`. The daemon turns it into the fail-safe pause described in
+  `safe-mode gate in the daemon` below; other commands surface the error.
 
 `daemon status` reports `running`, `implemented`, `enabled`, `interval_s` and three optional display
 fields (`screen`, `screen_age_s`, `screen_checked_at`):
@@ -447,11 +476,15 @@ fields (`screen`, `screen_age_s`, `screen_checked_at`):
 {"v":1,"ok":true,"data":{"running":false,"implemented":true,"enabled":true,"interval_s":10,"screen":"unknown","screen_age_s":null,"screen_checked_at":null}}
 ```
 
-`running` is whether a live daemon process passed the PID + `/proc/<pid>/cmdline` check, `enabled`
-is the persisted intent, and `implemented` is always `true` on this binary — it exists so a client
-talking to an older module can tell "not implemented" apart from "not running". The three display
-fields are **optional and backwards compatible**: older modules omit them entirely, and a client
-must treat a missing value as `unknown` / `null`.
+`running` is whether a live daemon process passed the PID + `/proc/<pid>/cmdline` check, and
+`implemented` is always `true` on this binary — it exists so a client talking to an older module can
+tell "not implemented" apart from "not running". `enabled` is the **client-facing permission to
+enforce**, not a stored flag: it is true only while boot-time apply is enabled, the safety gate is
+open (no safe mode and no rescue marker) and the daemon was not explicitly disabled (`no_enforce`).
+It is not a liveness flag, so it can be `false` while `running` is `true`: an already-running daemon
+pauses its automatic writes on the next tick (§ `safe-mode gate in the daemon`) instead of exiting.
+The three display fields are **optional and backwards compatible**: older modules omit them entirely,
+and a client must treat a missing value as `unknown` / `null`.
 
 - `screen` is the daemon's most recent display detection: `"on"`, `"off"` or `"unknown"`. A missing
   or corrupt snapshot is reported as `"unknown"`.
@@ -469,9 +502,24 @@ temp file plus `rename` (atomic, so a killed daemon never leaves a half-written 
 reads this file rather than querying the daemon directly.
 
 `daemon configure --enabled true` starts automatic drift repair and adaptive sampling; `--enabled
-false` stops it. Continuous guard requires boot-time apply to remain enabled. The interval may be set
-with `--interval N` (2–120 s). `daemon start` / `daemon stop` are lower-level lifecycle operations;
-normal users should use `daemon configure` or the Settings screen.
+false` stops it and records the opt-out as the `no_enforce` file (a file, not a config key, so the
+guard can still be disabled when the config cannot even be read). `--enabled true` is refused when
+boot-time apply is disabled (`invalid_arg`) or when the safety gate is closed (`safe_mode`); the
+message names the real cause — "blocked while the rescue marker is active" vs "blocked while safe
+mode is active" — while the code stays `safe_mode`, the protocol's "tuning refused by the safety
+state" code. On success it removes the `no_enforce` file before starting the process. The interval
+may be set with `--interval N` (2–120 s).
+
+`daemon start` / `daemon stop` are lower-level lifecycle operations; normal users should use `daemon
+configure` or the Settings screen. `daemon start` never spawns a process when automatic writes may not
+run; it replies `{"running":false,"enabled":false,"reason":"…"}` with the first matching reason in
+this order: `"boot_apply_disabled"` (boot-time apply is off), then `"disable_tuning"` (rescue marker)
+or `"safe_mode"`, then `"disabled"` (the explicit `no_enforce` opt-out). This order differs from
+`apply-boot`, which checks the rescue marker and safe mode before "boot apply disabled"; all four
+replies mean the same thing to a client — do not start automatic writers — only `reason` differs.
+Boot-time apply being disabled is not re-checked by a running daemon: it is enforced when the daemon
+starts, so `boot configure --enabled false` takes effect from the next boot and does not stop an
+already-running process.
 
 The daemon also owns display transitions. Each round it reads `/sys/class/backlight/*/brightness` as
 a cheap change detector and asks `dumpsys power` (3 s timeout) when **the raw brightness value
@@ -492,28 +540,75 @@ recorded with every history sample. Polling is 1 s while the display is off (or 
 pending) and 5 s while it is on, never slower than the guard interval; each transition is logged as
 `screen transition state=… -> screen_off_active=…`. The daemon releases any active profile when it
 **starts** (a stale `screen_off_active` in the CPU state file is re-applied by every later `apply`, so
-a crash must not inherit it) and when it **stops**, so no stale cap is left behind in either
-direction. The Android screen-off controls are a secondary
+a crash must not inherit it), when it **stops**, and when the safety gate pauses automatic writes
+(§ `safe-mode gate in the daemon`); a stale cap is never left behind in any of those cases.
+The Android screen-off controls are a secondary
 page opened from the CPU screen; they are not a bottom-navigation destination. The watcher only runs
 while the daemon does: a boot whose `apply-boot` failed leaves the screen-off profile inactive instead
 of enforcing it without a supervisor.
 
+#### safe-mode gate in the daemon
+
+The daemon re-reads the config on **every** tick and evaluates the same gate as boot-time apply, in
+this priority order: rescue marker → safe mode. The marker is tested *before* the config is read, so
+it still works on a hard load failure (I/O error, newer version or lock timeout — see the config
+loading note in this section; a malformed file is not a failure, it degrades to defaults, so the
+daemon simply has no persisted settings to enforce on that tick). The gate is evaluated every tick
+because the user can create the marker or enter safe mode while the daemon is already running.
+
+While the gate is closed the daemon keeps its read-only work — display detection, the
+`daemon-screen.json` snapshot and the per-module `sample()` / history sampling — but pauses every
+automatic write: it applies no screen-off transitions and runs neither drift repair nor the adaptive
+controller. It also rolls an already-applied screen-off profile back to the user's limits: that
+release is a fixed recovery write, not tuning. It first tries the normal `set()` release; when `set()`
+is refused (safe mode blocks it), the same fixed request is issued through the module write path
+directly. The rollback is idempotent; later blocked ticks only retry it while the profile still reads
+active.
+
+Logging is edge-triggered: entering the block, leaving it, and changing the cause each write exactly
+one line (`automatic writes paused: safe_mode …`, `automatic writes paused: disable_tuning …`,
+`automatic writes resumed`). A config read **failure** — a hard load failure, not a malformed
+file — is treated as blocked (fail safe: state that cannot be read must never be overwritten) and
+is reported as `automatic writes paused: <error>`; normal enforcement resumes on the next tick whose
+config reads successfully. Only the hidden `enforce` command and the daemon's own writes are gated;
+read-only diagnostics such as `check` are deliberately exempt (§3.12). `enforce` replies
+`{"skipped":"disable_tuning"}` or `{"skipped":"safe_mode"}` instead of applying anything (a config
+load failure is an error reply, not a skip).
+
 #### apply-boot, boot-confirm and safe mode
+
+`service.sh` first runs the one-time legacy migration scripts (`migrate-legacy.sh` and
+`migrate-legacy-doze.sh`) and only then calls `apply-boot`: they restore the value the old SoCFlow
+module saved and stop its retired Doze worker. Those are recovery-class writes, so they run **before**
+this gate and are intentionally not suppressed by safe mode or the rescue marker; they become no-ops
+once their legacy state files are gone.
 
 `apply-boot` (called by `service.sh`) runs its checks in this order — the order matters, because a
 rescue marker must win over safe mode and safe mode must win over "boot apply disabled":
 
 1. `disable_tuning` marker in the data dir or the module dir → `{"skipped":"disable_tuning"}`
-   (boot counter untouched).
+   (boot counter untouched). This check runs **before** `config.json` is loaded: the marker exists
+   for exactly the case where the config cannot be trusted, so a hard load failure (I/O error or a
+   version newer than this binary) must not pre-empt the rescue path; a malformed file degrades to
+   defaults and is not a failure (§ config loading above). `enforce` and the daemon gate
+   short-circuit on the marker the same way.
 2. Already in safe mode → `{"skipped":"safe_mode"}`.
-3. `boot.enabled == false` → no ordinary replay, but the independently configured WALT guard is still
-   applied: `{"boot_disabled":true,"walt_guard":{<set result>}}`, or
+3. `boot.enabled == false` → no ordinary replay and no unconfirmed-boot accounting: the
+   independently configured WALT guard is still applied, and this runs *before* `safe.boot_count` is
+   touched, so a boot with boot-apply disabled neither increments the counter nor can enter safe mode
+   itself: `{"boot_disabled":true,"walt_guard":{<set result>}}`, or
    `{"skipped":"boot_disabled","walt_guard":"not_configured"}` when `cpu.walt_guard` was never
-   persisted (`"not_applied"` when the rescue marker blocks it).
+   persisted. The third shape, `{"skipped":"<reason>","walt_guard":"not_applied"}`, is a defensive
+   branch: it only fires if the rescue marker or safe mode appears *between* steps 1–2 and this
+   call, so the normal path makes it unreachable. When it does fire, `skipped` is the real current
+   reason — `"disable_tuning"` or `"safe_mode"`, never the generic `"boot_disabled"` — so the wire
+   never claims boot apply was disabled when it was not. All three shapes carry no `applied` /
+   `errors` keys, so `service.sh` does not treat them as a successful ordinary apply.
 4. Wait `boot.delay_s` (unless `--no-delay`).
-5. If `safe.boot_count >= safe.threshold` (default 3) → enter safe mode,
-   `{"skipped":"safe_mode"}`, and isolate the current `config.modules` into `recovery_backup`.
-   Otherwise `boot_count += 1` and apply persisted settings.
+5. If `safe.boot_count >= safe.threshold` (default 3; the loader normalises `threshold` to at least 1,
+   because `0` would mean "every boot is unconfirmed" and a cleared safe mode would fall straight
+   back into it) → enter safe mode, `{"skipped":"safe_mode"}`, and isolate the current
+   `config.modules` into `recovery_backup`. Otherwise `boot_count += 1` and apply persisted settings.
 6. Reply `{"applied":{<module>:<set result>},"errors":{<module>:{code,msg}}}`.
 
 Before replaying persisted settings, `apply-boot` calls each supported module's reset hook, so
@@ -522,7 +617,13 @@ settings applied without `--persist` last boot) cannot leak into the new boot.
 
 `boot-confirm` sets `boot_count` to 0 (`service.sh` calls it 60 s after apply-boot).
 `safe-mode status` → `{"safe_mode":false,"boot_count":0,"threshold":3,"rescue_marker":false}`;
-`safe-mode clear` leaves safe mode and resets the counter (same reply).
+`safe-mode clear` leaves safe mode and resets the counter (same reply). `threshold` is reported as
+the boot logic uses it, i.e. after the config loader normalises a hand-edited `0` to `1` (`0` would
+mean every boot is unconfirmed, so a cleared safe mode would re-enter it on the very next boot);
+`recovery status` reports the same normalised value. `rescue_marker` is independent of the persisted
+flag, so `safe_mode:false` never hides an active marker: the marker wins over safe mode in both
+`apply-boot` and the daemon gate, `set` is refused only by safe mode (manual tuning stays possible
+with the marker), and `reset` works in both states.
 
 ### 3.14 note and log
 
@@ -1474,13 +1575,46 @@ type, so `boot status` is still parsed as `JsonObject`.
 
 ## 5. Compatibility
 
-- `protocol` is an integer bumped only for incompatible changes.
-- The APK compares `version.protocol` with its own `PROTOCOL_VERSION` for **exact equality** and
-  refuses to talk to the module when they differ. There is no `MIN_SYSFLOW_PROTOCOL` and no
-  "older vs newer" split: the single message names both versions and asks the user to update the
-  module *or* the app (`协议版本不匹配：模块 1，应用 2。请更新模块或应用。`).
-- Because the check is equality, a protocol bump requires a module and an APK release together; the
-  "additive-only" rule below is what keeps that rare.
+### Compatibility policy
+
+`protocol` is an integer bumped only for **incompatible** changes. Additive changes — a new optional
+field, item, verb, feature string or event type — never bump it: clients must ignore unknown JSON
+fields and treat a missing new field as absent/`null` (§1), so a module can be upgraded alone and an
+older APK keeps working. That additive-only rule is what keeps the strict check below rare.
+
+The APK compares `version.protocol` with its own generated `PROTOCOL_VERSION` for **exact equality**
+(`SysFlowClient.verifyProtocol`) and refuses to talk to the module when they differ. There is no
+`MIN_SYSFLOW_PROTOCOL` and no "older vs newer" split: the single message names both versions and asks
+the user to update the module *or* the app (`协议版本不匹配：模块 1，应用 2。请更新模块或应用。`). The
+module WebUI applies the same equality rule against `caps.protocol`, so a mismatch also stops the
+rescue console. The mock module (`SYSFLOW_MOCK=1`) runs inside the same binary and always reports the
+same protocol, so host runs cannot mask a mismatch.
+
+**Why fail closed.** A mismatch means the two ends disagree about what the wire means, and the caller
+runs as root: guessing across an incompatible change could write the wrong sysfs value, replay a
+profile the module no longer understands, or misread a safety state. Exact equality is the only check
+that can be verified without knowing which fields changed, and it turns a silent misinterpretation
+into a visible, actionable error. There is deliberately no compatibility shim, no automatic downgrade
+and no best-effort mode: either both ends speak protocol N, or the client refuses to act.
+
+### Bumping `protocol` (checklist)
+
+Bump `protocol` only when an existing field, item or verb changes meaning or is removed — never for an
+addition (see above). One bump must update every copy of the constant in the same change:
+
+1. `core/sysflow-core/src/envelope.rs` — `pub const PROTOCOL_VERSION` (runtime truth, also the
+   envelope `v`).
+2. `core/sysflow-types/src/main.rs` — the generator's Kotlin and TypeScript output literals. They are
+   deliberately not derived from `envelope.rs` (`sysflow-types` has no core dependency), so a bump
+   that only edits the constant would leave `Protocol.kt` stale.
+3. `module/webroot/app.js` — the rescue console's own copy of the constant.
+4. Run `tools/gen-types.sh` and commit the regenerated `app/.../Protocol.kt` (CI diffs it).
+5. `docs/protocol.md` — every `{"v":N}` envelope and `"protocol":N` example in this file.
+6. Release the module and the APK together, and say so in both release notes: the other side must be
+   updated too, because a mismatch is a hard error rather than a warning.
+
+`tools/check-protocol.sh` fails when these copies disagree, so a half-finished bump cannot merge
+unnoticed; it only reads a few files (no build), so CI can run it next to `tools/check-version.sh`.
 
 ## 6. Environment overrides (tests and host runs)
 

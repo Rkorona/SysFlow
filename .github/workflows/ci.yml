@@ -29,6 +29,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: for f in module/*.sh tools/*.sh; do sh -n "$f"; done
+      - run: sh tools/check-version.sh
+      # The protocol version literal is duplicated in envelope.rs, the generated Protocol.kt, the
+      # types generator, the WebUI and docs/protocol.md; this gate stops the copies from drifting.
+      - run: sh tools/check-protocol.sh
+      # tools/check-modes.sh is added by the android workstream; this step depends on that file.
+      - run: sh tools/check-modes.sh
+      # Event vocabulary gate: docs/events-catalog.md is generated from the event producers, so any
+      # change that touches a producer must refresh the catalog. Intentionally not passing
+      # --strict-labels yet: two display events still lack a zh label (android will add them).
+      - run: python3 tools/check-events.py --check
 
   android-app:
     runs-on: ubuntu-latest
@@ -38,12 +48,31 @@ jobs:
         with:
           distribution: temurin
           java-version: 21
+          cache: gradle
       - uses: android-actions/setup-android@v3
       - name: Install compile SDK
         run: |
           yes | sdkmanager --licenses >/dev/null || true
-          sdkmanager "platforms;android-37.1" "build-tools;37.0.0"
-      - run: chmod +x gradlew && ./gradlew :app:assembleDebug
+          sdkmanager "platforms;android-37.1" "build-tools;37.0.0" "build-tools;36.0.0"
+      # Robolectric downloads its android-all-instrumented SDK jar (~250 MB per SDK) into the local
+      # Maven repository on first use; cache it so unit tests do not re-download it on every run.
+      - name: Cache Robolectric SDK jars
+        uses: actions/cache@v4
+        with:
+          path: ~/.m2/repository/org/robolectric
+          # Include the version catalog so a Robolectric/SDK bump misses the cache instead of
+          # silently restoring stale android-all jars (cache entries are immutable).
+          key: robolectric-4.18.1-${{ runner.os }}-${{ hashFiles('gradle/libs.versions.toml') }}
+          restore-keys: |
+            robolectric-4.18.1-${{ runner.os }}-
+      - run: chmod +x gradlew && ./gradlew --stacktrace :app:testDebugUnitTest :app:assembleDebug
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sysflow-test-reports
+          path: |
+            app/build/test-results/testDebugUnitTest/
+            app/build/reports/tests/testDebugUnitTest/
       - uses: actions/upload-artifact@v4
         with:
           name: sysflow-apk
@@ -60,7 +89,22 @@ jobs:
       - run: cargo install cargo-ndk
       - run: cargo ndk -t arm64-v8a build --release -p sysflow-cli
         working-directory: core
-      - run: sh tools/pack-module.sh core/target/aarch64-linux-android/release/sysflow
+      - run: SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) sh tools/pack-module.sh core/target/aarch64-linux-android/release/sysflow
+      # Package twice from the same inputs: the SHA256 must be identical, otherwise the archive is
+      # not reproducible (timestamps, ordering or permissions regressed in tools/pack-module.sh).
+      - name: Verify module zip is reproducible
+        run: |
+          set -eu
+          FIRST="$(cat dist/sysflow-module-*.zip.sha256)"
+          SOURCE_DATE_EPOCH=$(git log -1 --format=%ct) sh tools/pack-module.sh core/target/aarch64-linux-android/release/sysflow
+          SECOND="$(cat dist/sysflow-module-*.zip.sha256)"
+          if [ "$FIRST" != "$SECOND" ]; then
+            echo "module zip is not reproducible:" >&2
+            echo "  first:  $FIRST" >&2
+            echo "  second: $SECOND" >&2
+            exit 1
+          fi
+          echo "reproducible: $SECOND"
       - uses: actions/upload-artifact@v4
         with:
           name: sysflow-module

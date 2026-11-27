@@ -97,8 +97,10 @@ rules (persist/reset/boot/check) against a smaller tree.
 
 ## Drift semantics
 
-`drift()` is the read-only check the enforcement daemon runs each tick; anything it returns is
-re-applied. Two rules matter and are easy to get wrong:
+`drift()` is the read-only check the enforcement daemon runs on each unblocked enforcement tick
+(automatic writes are paused in safe mode or while the rescue marker is present, see
+`docs/protocol.md` §3.13); anything it returns is re-applied. Two rules matter and are easy to get
+wrong:
 
 - **`max_freq` and `min_freq` compare in opposite directions** while adaptive control or the
   screen-off profile is active. A live ceiling *below* the request is fine (thermal, adaptive), and a

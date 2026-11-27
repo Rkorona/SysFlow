@@ -262,12 +262,14 @@ impl Registry {
     /// adaptive control is enabled, even when there is no drift, so load/thermal/battery/PSI
     /// hysteresis advances at the configured guard interval.
     pub fn enforce(&self) -> Result<Value> {
+        // The rescue marker is checked before the config is loaded on purpose: it exists for the
+        // case where the config cannot be trusted, so a load error must not pre-empt the rescue.
         if safe::rescue_marker_present(&self.ctx) {
-            return Ok(json!({ "skipped": "disable_tuning" }));
+            return Ok(json!({ "skipped": safe::RESCUE_REASON }));
         }
         let cfg = self.store.load()?;
-        if cfg.safe.safe_mode {
-            return Ok(json!({ "skipped": "safe_mode" }));
+        if let Some(reason) = safe::block_reason(&cfg, &self.ctx) {
+            return Ok(json!({ "skipped": reason }));
         }
         let mut applied = Map::new();
         let mut skipped = Map::new();

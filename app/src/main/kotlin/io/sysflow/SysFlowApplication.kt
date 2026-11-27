@@ -4,6 +4,8 @@ import android.app.Application
 import androidx.room.Room
 import io.sysflow.core.event.EventDatabase
 import io.sysflow.core.event.EventRepository
+import io.sysflow.core.event.EventSource
+import io.sysflow.core.event.SysFlowClientEventSource
 import io.sysflow.core.root.RootExecutor
 import io.sysflow.core.root.SysFlowClient
 import io.sysflow.feature.cpu.CpuViewModel
@@ -23,7 +25,9 @@ import org.koin.core.module.dsl.viewModel
 import org.koin.core.context.startKoin
 import org.koin.dsl.module
 
-private val appModule = module {
+// `internal`, not file-private: unit tests start this module in a non-global Koin instance to
+// verify the bindings; production still starts exactly one graph from the Application.
+internal val appModule = module {
     single { RootExecutor() }
     single { SysFlowClient(get()) }
     single {
@@ -31,6 +35,7 @@ private val appModule = module {
             .addMigrations(EventDatabase.MIGRATION_1_2)
             .build()
     }
+    single<EventSource> { SysFlowClientEventSource(get()) }
     single { EventRepository(get(), get()) }
     single { ProcessTuningStore(androidContext()) }
     viewModel { AppViewModel(get(), get()) }

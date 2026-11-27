@@ -25,7 +25,7 @@ Builds:
 Does NOT build the Android APK.
 
 Required tools:
-  Rust (rustup + cargo), zip, sha256sum
+  Rust (rustup + cargo), python3, sha256sum
   Android NDK (NDK path/configuration required by cargo-ndk)
 
 The WebUI is plain HTML/CSS/JS under module/webroot and needs no build step.
@@ -49,7 +49,7 @@ esac
 log "Checking build tools"
 need_cmd rustup
 need_cmd cargo
-need_cmd zip
+need_cmd python3
 need_cmd sha256sum
 
 if ! command -v cargo-ndk >/dev/null 2>&1; then

@@ -10,3 +10,8 @@ local.properties
 .idea/
 *.iml
 .DS_Store
+# Release artifacts
+dist/
+# Local build-environment cache (e.g. .cache/android-bootstrap holds a bootstrap JDK/SDK); it is
+# recreated on demand and must never be committed.
+.cache/

@@ -2,7 +2,6 @@ package io.sysflow.core.event
 
 import androidx.room.withTransaction
 import io.sysflow.core.model.ModuleSystemEvent
-import io.sysflow.core.root.SysFlowClient
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -12,10 +11,13 @@ import kotlinx.serialization.json.Json
 /**
  * Synchronizes the module-owned durable journal into a Room read model.
  * The APK never creates or infers system events; it only imports and presents module records.
+ *
+ * The journal is read through [EventSource] so the sync logic can be exercised on the JVM with a
+ * fake source instead of requiring root/libsu.
  */
 class EventRepository(
     private val database: EventDatabase,
-    private val client: SysFlowClient,
+    private val source: EventSource,
 ) {
     private val dao = database.systemEventDao()
     private val syncMutex = Mutex()
@@ -69,9 +71,9 @@ class EventRepository(
             // from the oldest record already in Room instead of incorrectly treating it as complete.
             val oldestLocal = dao.oldest()
             var page = if (oldestLocal == null) {
-                client.events(limit = SYNC_PAGE_SIZE)
+                source.events(limit = SYNC_PAGE_SIZE)
             } else {
-                client.events(
+                source.events(
                     limit = SYNC_PAGE_SIZE,
                     beforeTimestampMs = oldestLocal.timestampMs,
                     beforeId = oldestLocal.id,
@@ -81,7 +83,7 @@ class EventRepository(
                 insertedTotal += insertPage(page.events.map { it.toEntity() }, now)
                 if (page.events.size < SYNC_PAGE_SIZE) break
                 val oldest = page.events.last()
-                page = client.events(
+                page = source.events(
                     limit = SYNC_PAGE_SIZE,
                     beforeTimestampMs = oldest.timestampMs,
                     beforeId = oldest.id,
@@ -97,7 +99,7 @@ class EventRepository(
             var afterTimestamp = localCursor.timestampMs
             var afterId = localCursor.id
             while (true) {
-                val page = client.events(
+                val page = source.events(
                     limit = SYNC_PAGE_SIZE,
                     afterTimestampMs = afterTimestamp,
                     afterId = afterId,
@@ -123,7 +125,7 @@ class EventRepository(
     /** Import one older page from the Root journal, suitable for an event-history screen. */
     suspend fun syncOlderPage(): Int = syncMutex.withLock {
         val oldest = dao.oldest() ?: return@withLock 0
-        val page = client.events(
+        val page = source.events(
             limit = SYNC_PAGE_SIZE,
             beforeTimestampMs = oldest.timestampMs,
             beforeId = oldest.id,
@@ -153,7 +155,7 @@ class EventRepository(
      */
     private suspend fun repairOrphanedMirror() {
         val newest = dao.newest() ?: return
-        val page = runCatching { client.events(limit = 1, ascending = true) }.getOrNull() ?: return
+        val page = runCatching { source.events(limit = 1, ascending = true) }.getOrNull() ?: return
         val journalOldest = page.events.firstOrNull()
         if (mirrorIsOrphaned(journalOldest?.timestampMs, newest.timestampMs)) {
             dao.clearLocal()

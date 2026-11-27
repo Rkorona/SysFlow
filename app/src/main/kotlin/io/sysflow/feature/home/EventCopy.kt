@@ -103,6 +103,8 @@ private val eventLabels = mapOf(
     "psi_guard_transition" to "内存压力护栏变更",
     "screen_off_profile_released" to "熄屏限制已关闭",
     "screen_off_restore_failed" to "熄屏限制关闭失败",
+    "screen_detection_fallback" to "熄屏检测异常，已解除限制",
+    "screen_transition_failed" to "熄屏限制切换失败",
     "charging_started" to "开始充电",
     "charging_stopped" to "停止充电",
     "fully_charged" to "电池已充满",

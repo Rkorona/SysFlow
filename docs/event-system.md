@@ -34,6 +34,36 @@ repeated transition observations, not for distinct occurrences. Deduplication is
 category, event type and key; the dedupe window is configurable. The APK mirrors the optional key
 in Room for lossless record storage.
 
+## Machine-checked event vocabulary
+
+The open-world contract above is still the only rule producers must follow. Because "any stable
+identifier" is also easy to typo, `tools/check-events.py` keeps the *shipped* producers honest without
+turning the protocol into a registry:
+
+- It inventories every literal producer — Rust `NewSystemEvent::new(...)` calls outside `#[cfg(test)]`
+  and shell `event emit --module .. --category .. --type ..` lines (continuations joined) — and
+  regenerates `docs/events-catalog.md`. That file is generated, not hand-maintained: run the tool and
+  commit the result with the code change.
+- It validates those literals against the contract: `module` and `category` are 1–64 characters and
+  `event_type` is 1–96, all from `[A-Za-z0-9._-]`, and a literal `severity` must be one of `info`,
+  `notice`, `warning`, `error`, `critical` (`docs/protocol.md` §3.10; numeric limits mirrored from
+  `core/sysflow-core/src/event.rs`).
+- Non-literal values (variables, `format!`, shell `$VAR`) are never ignored: they are listed in the
+  catalog's dynamic section so a refactor cannot silently drop a producer.
+- It proves the APK stays a client: `app/**` must not emit events (`event list` is the only event
+  command the APK may call).
+- `tools/check-events.py --check` fails when the catalog is stale or a literal is malformed, so CI can
+  run it as a drift gate.
+
+This is a lint over *this repository's* producers, not an allow-list: an unknown module, category or
+event type from a future producer still works at runtime, Room still stores it, and the APK still
+renders it from the producer's own `title` / `message`. A missing Chinese label in `EventCopy.kt` is
+reported by `--check` but does not fail (use `--strict-labels` to make it fail); a new event is
+expected to arrive before its presentation copy, and unknown events must never be hidden.
+
+To add an event: write the producer with literal identifiers, run `tools/check-events.py`, and commit
+`docs/events-catalog.md` together with the code change.
+
 ## Emit from any module or service script
 
 The generic CLI is the recommended bridge for shell-based producers and future modules:

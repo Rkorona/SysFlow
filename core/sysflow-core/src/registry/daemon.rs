@@ -20,7 +20,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{json, Map, Value};
 
 use crate::error::{Error, Result};
 use crate::event::NewSystemEvent;
@@ -38,6 +38,9 @@ const SCREEN_OFF_TICK: Duration = Duration::from_secs(1);
 const SCREEN_ON_TICK: Duration = Duration::from_secs(5);
 /// Default guard interval when `guard_interval` is missing or invalid.
 const DEFAULT_GUARD_SECS: u64 = 10;
+/// Log/metadata reason when the gate could not read the config. Not a wire value: `blocked`
+/// carries the protocol reason strings, and this only labels the fail-safe path.
+const CONFIG_ERROR_REASON: &str = "config_error";
 
 /// Everything the loop carries between ticks. Keeping it in one struct makes the restart behaviour
 /// obvious: a new daemon process starts with no memory, detects the display immediately and rebuilds
@@ -51,6 +54,16 @@ struct LoopState {
     screen_state: ScreenState,
     /// Last screen-transition error, so a persistent failure is logged once instead of every second.
     screen_error: Option<String>,
+    /// Why automatic writes were blocked on the previous tick (`None` = allowed), so a transition
+    /// into/out of safe/rescue mode is logged once instead of every tick.
+    blocked: Option<&'static str>,
+    /// Set when the gate could not read the config. Kept apart from `blocked` so the error is
+    /// logged once and the loop fails safe (no automatic writes) until the read works again.
+    block_error: Option<String>,
+    /// Last blocked-state release failure that was already logged. `Some` keeps a persistent
+    /// failure from filling the log every tick (the release keeps being retried) and makes the
+    /// recovery log exactly once.
+    release_failure: Option<String>,
     /// Wall-clock second of the last published `daemon-screen.json` snapshot. The status command is
     /// a different process, so the loop publishes its detection there (throttled to 5 s).
     last_status_write: Option<u64>,
@@ -65,6 +78,9 @@ impl LoopState {
             screen: ScreenWatcher::new(registry.ctx.sysfs.clone()),
             screen_state: ScreenState::Unknown,
             screen_error: None,
+            blocked: None,
+            block_error: None,
+            release_failure: None,
             last_status_write: None,
         }
     }
@@ -161,8 +177,7 @@ impl Registry {
     pub fn daemon_status(&self) -> Result<Value> {
         let cfg = self.store.load()?;
         let enabled = cfg.boot.enabled
-            && !cfg.safe.safe_mode
-            && !safe::rescue_marker_present(&self.ctx)
+            && safe::block_reason(&cfg, &self.ctx).is_none()
             && !self.ctx.data_dir.join("no_enforce").exists();
         let (screen, checked_at, success_at) = self.read_screen_status();
         // Age is computed at read time: if the daemon died, the persisted timestamp stops advancing
@@ -191,8 +206,10 @@ impl Registry {
                 json!({ "running": false, "enabled": false, "reason": "boot_apply_disabled" }),
             );
         }
-        if cfg.safe.safe_mode || safe::rescue_marker_present(&self.ctx) {
-            return Ok(json!({ "running": false, "enabled": false, "reason": "safe_mode" }));
+        if let Some(reason) = safe::block_reason(&cfg, &self.ctx) {
+            // True cause on the wire: the marker is not safe mode and clients that show the reason
+            // should say so. `service.sh` and the WebUI ignore this field (qa audit).
+            return Ok(json!({ "running": false, "enabled": false, "reason": reason }));
         }
         if self.ctx.data_dir.join("no_enforce").exists() {
             return Ok(json!({ "running": false, "enabled": false, "reason": "disabled" }));
@@ -317,10 +334,16 @@ impl Registry {
                         "continuous guard requires boot-time apply to be enabled",
                     ));
                 }
-                if cfg.safe.safe_mode || safe::rescue_marker_present(&self.ctx) {
-                    return Err(Error::safe_mode(
-                        "continuous guard is blocked while safe mode is active",
-                    ));
+                if let Some(reason) = safe::block_reason(&cfg, &self.ctx) {
+                    // The error code stays `safe_mode` (part of the protocol); the message names the
+                    // actual cause, because with only the rescue marker active the old text claimed
+                    // safe mode was on.
+                    let msg = if reason == safe::RESCUE_REASON {
+                        "continuous guard is blocked while the rescue marker is active"
+                    } else {
+                        "continuous guard is blocked while safe mode is active"
+                    };
+                    return Err(Error::safe_mode(msg));
                 }
                 let _ = std::fs::remove_file(self.ctx.data_dir.join("no_enforce"));
                 let _ = self.daemon_start()?;
@@ -364,22 +387,139 @@ impl Registry {
     fn daemon_tick(&self, state: &mut LoopState) {
         let previous = state.screen_state;
         state.screen_state = state.screen.detect();
-        self.screen_profile_tick(state);
+
+        // Protocol §3.13: rescue marker > safe mode > boot disabled. This is the single gate for
+        // every *automatic* write the tick performs (screen-off profile and drift repair). It runs
+        // every tick because the user can create the marker or enter safe mode while the daemon is
+        // already running. Read-only sampling below is never gated, so the journal keeps recording
+        // the device state while tuning is paused.
+        let was_blocked = state.blocked.is_some() || state.block_error.is_some();
+        let (blocked, block_error) = match self.tuning_block() {
+            Ok(reason) => (reason, None),
+            // Fail safe: state that cannot be read must never be overwritten.
+            Err(e) => (None, Some(e.msg)),
+        };
+        if blocked != state.blocked || block_error != state.block_error {
+            match (&blocked, &block_error) {
+                (_, Some(error)) => self
+                    .log
+                    .error(&format!("automatic writes paused: {error} (sampling continues)")),
+                (Some(reason), None) => self.log.warn(&format!(
+                    "automatic writes paused: {reason} (automatic tuning stopped, sampling continues)"
+                )),
+                (None, None) => self.log.info("automatic writes resumed"),
+            }
+            if blocked.is_none() && block_error.is_none() {
+                state.release_failure = None;
+            }
+            state.blocked = blocked;
+            state.block_error = block_error;
+        }
+        let blocked_now = state.blocked.is_some() || state.block_error.is_some();
+        if blocked_now {
+            // Roll back an active screen-off profile: restoring the user's limits is a recovery
+            // write, not tuning, and leaving caps/offline cores applied is the failure mode safe mode
+            // and the rescue marker exist to prevent. One attempt when the block starts, plus retries
+            // only while the last attempt is known to have failed — a success is not repeated on
+            // every tick.
+            let reason = state.blocked.unwrap_or(CONFIG_ERROR_REASON);
+            if !was_blocked || state.release_failure.is_some() {
+                self.release_screen_profile_when_blocked(state, reason);
+            }
+        } else {
+            self.screen_profile_tick(state);
+        }
         self.publish_screen_status(state, previous != state.screen_state);
-        if !self.ctx.data_dir.join("no_enforce").exists() {
-            let guard = Duration::from_secs(self.guard_interval_secs());
-            let due = state
-                .last_guard
-                .map(|last| last.elapsed() >= guard)
-                .unwrap_or(true);
-            if due {
-                state.last_guard = Some(Instant::now());
-                if let Err(e) = self.enforce() {
-                    self.log.error(&format!("enforcement tick failed: {e}"));
+        if !blocked_now {
+            self.enforcement_tick(state);
+        }
+        self.sample_due_modules(state);
+    }
+
+    /// The daemon's view of the automatic-write gate, in protocol priority order.
+    ///
+    /// The marker is checked first and needs no config read, so it still works when `config.json`
+    /// cannot be loaded; that is exactly the situation the marker exists for.
+    fn tuning_block(&self) -> Result<Option<&'static str>> {
+        if safe::rescue_marker_present(&self.ctx) {
+            return Ok(Some(safe::RESCUE_REASON));
+        }
+        let cfg = self.store.load()?;
+        Ok(safe::block_reason(&cfg, &self.ctx))
+    }
+
+    /// Run the drift-repair / adaptive tick when it is due.
+    fn enforcement_tick(&self, state: &mut LoopState) {
+        if self.ctx.data_dir.join("no_enforce").exists() {
+            return;
+        }
+        let guard = Duration::from_secs(self.guard_interval_secs());
+        let due = state
+            .last_guard
+            .map(|last| last.elapsed() >= guard)
+            .unwrap_or(true);
+        if due {
+            state.last_guard = Some(Instant::now());
+            if let Err(e) = self.enforce() {
+                self.log.error(&format!("enforcement tick failed: {e}"));
+            }
+        }
+    }
+
+    /// Release the screen-off CPU profile while automatic writes are blocked.
+    ///
+    /// The release is unconditional and idempotent: it does not gate on a read (`get()` can fail
+    /// exactly when the config is unreadable) and the CPU module treats an already-released profile
+    /// as a no-op, so entering a blocked state always makes one honest attempt. It goes straight to
+    /// the module write path because `set()` refuses writes in safe mode, and leaving caps/offline
+    /// cores behind is the failure mode the gate exists to avoid.
+    ///
+    /// A persistent failure is logged once, not on every tick; the loop retries until it succeeds
+    /// and logs that recovery once.
+    fn release_screen_profile_when_blocked(&self, state: &mut LoopState, reason: &str) {
+        let mut request = Map::new();
+        request.insert("cpu.screen_off_active".to_string(), Value::Bool(false));
+        let outcome = match self.find_supported("cpu") {
+            Ok(module) => module.apply(&request),
+            Err(e) => Err(e),
+        };
+        match outcome {
+            Ok(_) => {
+                match state.release_failure.take() {
+                    Some(failure) => self.log.warn(&format!(
+                        "screen-off profile release recovered (reason={reason}); sampling continues; \
+                         previous failure: {failure}"
+                    )),
+                    None => self.log.warn(&format!(
+                        "screen-off profile release applied (reason={reason}; already-released is a \
+                         no-op), sampling continues"
+                    )),
+                }
+                self.emit_event(
+                    NewSystemEvent::new(
+                        "cpu",
+                        "power",
+                        "screen_off_profile_released",
+                        "notice",
+                        "CPU screen-off profile released",
+                    )
+                    .message(
+                        "Released the screen-off CPU profile while automatic tuning is paused.",
+                    )
+                    .metadata(json!({ "reason": reason, "automatic_writes": "blocked" }))
+                    .dedupe("cpu.screen_off.released", 60),
+                );
+            }
+            Err(e) => {
+                let message = e.msg;
+                if state.release_failure.as_deref() != Some(message.as_str()) {
+                    self.log.error(&format!(
+                        "screen-off profile release failed (reason={reason}): {message}"
+                    ));
+                    state.release_failure = Some(message);
                 }
             }
         }
-        self.sample_due_modules(state);
     }
 
     /// Keep the screen-off CPU profile in sync with the display, and clean up after the feature is
@@ -674,10 +814,20 @@ mod tests {
         (dir, ctx)
     }
 
+    /// Shared fake-module state: one test can drive the profile, count drift checks and make the
+    /// recovery release fail without reaching into module internals.
+    #[derive(Default)]
+    struct FakeCpuState {
+        active: bool,
+        drift_calls: usize,
+        /// When set, a release request (`cpu.screen_off_active = false`) fails with this message.
+        release_error: Option<String>,
+    }
+
     /// A CPU stand-in that only owns the two screen-off flags, so `screen_profile_tick` can be
     /// driven on a host without a real kernel tree.
     struct FakeCpu {
-        active: Arc<Mutex<bool>>,
+        state: Arc<Mutex<FakeCpuState>>,
     }
 
     impl Module for FakeCpu {
@@ -706,80 +856,96 @@ mod tests {
             if wanted("cpu.screen_off_active") {
                 out.insert(
                     "cpu.screen_off_active".into(),
-                    json!(*self.active.lock().unwrap()),
+                    json!(self.state.lock().unwrap().active),
                 );
             }
             Ok(Value::Object(out))
         }
         fn apply(&self, req: &Map<String, Value>) -> Result<ApplyResult> {
             if let Some(want) = req.get("cpu.screen_off_active").and_then(Value::as_bool) {
-                *self.active.lock().unwrap() = want;
+                let mut state = self.state.lock().unwrap();
+                if !want {
+                    if let Some(message) = state.release_error.clone() {
+                        return Err(Error::io(message));
+                    }
+                }
+                state.active = want;
             }
             Ok(ApplyResult::from_readback(req, req.clone()))
         }
+        fn drift(&self, _settings: &Map<String, Value>) -> Result<Vec<String>> {
+            self.state.lock().unwrap().drift_calls += 1;
+            Ok(Vec::new())
+        }
     }
 
-    fn fixture(name: &str, backlight: Option<u64>) -> (Registry, Arc<Mutex<bool>>, LoopState) {
+    fn fixture(
+        name: &str,
+        backlight: Option<u64>,
+    ) -> (Registry, Arc<Mutex<FakeCpuState>>, LoopState) {
         let (dir, ctx) = temp_ctx(name);
         if let Some(brightness) = backlight {
             let node = dir.join("sys/class/backlight/panel");
             fs::create_dir_all(&node).unwrap();
             fs::write(node.join("brightness"), format!("{brightness}\n")).unwrap();
         }
-        let active = Arc::new(Mutex::new(true));
+        let fake = Arc::new(Mutex::new(FakeCpuState {
+            active: true,
+            ..FakeCpuState::default()
+        }));
         let reg = Registry::new(
             ctx,
             vec![Box::new(FakeCpu {
-                active: active.clone(),
+                state: fake.clone(),
             })],
         );
         let mut state = LoopState::new(&reg);
         state.screen = ScreenWatcher::with_script(reg.ctx().sysfs.clone(), vec![Some(OFF), None])
             .with_unknown_timeout(Duration::from_millis(60));
-        (reg, active, state)
+        (reg, fake, state)
     }
 
     #[test]
     fn active_profile_is_released_when_backlight_is_on_and_detection_stales() {
-        let (reg, active, mut state) = fixture("release-backlight", Some(800));
+        let (reg, fake, mut state) = fixture("release-backlight", Some(800));
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
         assert!(
-            *active.lock().unwrap(),
+            fake.lock().unwrap().active,
             "confirmed off keeps the profile active"
         );
         thread::sleep(Duration::from_millis(90));
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
         assert!(
-            !*active.lock().unwrap(),
+            !fake.lock().unwrap().active,
             "stale unknown must release the profile even though the framework never said 'on'"
         );
     }
 
     #[test]
     fn active_profile_is_released_without_backlight_after_timeout() {
-        let (reg, active, mut state) = fixture("release-no-backlight", None);
+        let (reg, fake, mut state) = fixture("release-no-backlight", None);
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
-        assert!(*active.lock().unwrap());
+        assert!(fake.lock().unwrap().active);
         thread::sleep(Duration::from_millis(90));
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
-        assert!(!*active.lock().unwrap());
+        assert!(!fake.lock().unwrap().active);
     }
 
     #[test]
     fn active_profile_is_kept_before_the_timeout() {
-        let (reg, active, mut state) = fixture("keep-before-timeout", Some(800));
+        let (reg, fake, mut state) = fixture("keep-before-timeout", Some(800));
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
-        assert!(*active.lock().unwrap());
+        assert!(fake.lock().unwrap().active);
         // One failed answer is not enough — no sleeping, so the fallback cannot have fired.
         state.screen_state = state.screen.detect();
         reg.screen_profile_tick(&mut state);
         assert!(
-            *active.lock().unwrap(),
+            fake.lock().unwrap().active,
             "transient unknown must not release"
         );
         assert!(!state.screen.safety_on());
@@ -822,5 +988,198 @@ mod tests {
         assert_eq!(snapshot["screen"], "off");
         assert!(snapshot["checked_at"].is_u64());
         assert!(snapshot["success_at"].is_u64());
+    }
+
+    /// Count the gate transition lines in the module log, to prove the loop logs a block once
+    /// instead of every tick.
+    fn gate_log_lines(reg: &Registry, needle: &str) -> usize {
+        fs::read_to_string(reg.ctx().log_path())
+            .map(|text| text.lines().filter(|line| line.contains(needle)).count())
+            .unwrap_or(0)
+    }
+
+    #[test]
+    fn rescue_marker_pauses_automatic_writes_and_releases_the_profile() {
+        let (reg, fake, mut state) = fixture("marker-blocks", None);
+        // Simulate a profile that was applied before the user created the rescue marker.
+        assert!(fake.lock().unwrap().active);
+        fs::write(reg.ctx().data_dir.join("disable_tuning"), "").unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "the rescue marker must roll back an active screen-off profile"
+        );
+        // A blocked tick must not re-apply it (the screen is still off, so the old code would).
+        reg.daemon_tick(&mut state);
+        assert!(!fake.lock().unwrap().active, "blocked ticks must not write");
+        assert_eq!(
+            gate_log_lines(&reg, "automatic writes paused"),
+            1,
+            "the block must be logged once, not on every tick"
+        );
+    }
+
+    #[test]
+    fn removing_the_rescue_marker_resumes_automatic_writes() {
+        let (reg, fake, mut state) = fixture("marker-resume", None);
+        fs::write(reg.ctx().data_dir.join("disable_tuning"), "").unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(!fake.lock().unwrap().active);
+
+        fs::remove_file(reg.ctx().data_dir.join("disable_tuning")).unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(
+            fake.lock().unwrap().active,
+            "the screen-off profile is applied again once tuning is allowed"
+        );
+        assert_eq!(gate_log_lines(&reg, "automatic writes resumed"), 1);
+    }
+
+    #[test]
+    fn safe_mode_pauses_automatic_writes_and_releases_the_profile() {
+        let (reg, fake, mut state) = fixture("safe-blocks", None);
+        reg.store()
+            .update(|c| {
+                c.safe.safe_mode = true;
+                Ok(())
+            })
+            .unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "releasing the profile is the one write safe mode must not block"
+        );
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "safe mode must not re-apply the profile"
+        );
+        assert_eq!(
+            gate_log_lines(&reg, "automatic writes paused: safe_mode"),
+            1
+        );
+    }
+
+    #[test]
+    fn daemon_start_reports_the_true_block_reason() {
+        let (dir, ctx) = temp_ctx("start-reason");
+        let reg = Registry::new(ctx, vec![]);
+        fs::write(dir.join("disable_tuning"), "").unwrap();
+        let out = reg.daemon_start().unwrap();
+        assert_eq!(out["reason"], safe::RESCUE_REASON);
+        assert_eq!(out["running"], json!(false));
+        // The gate runs before the process is spawned, so no daemon was started here.
+        assert!(reg.daemon_pid().is_none());
+
+        fs::remove_file(dir.join("disable_tuning")).unwrap();
+        reg.store()
+            .update(|c| {
+                c.safe.safe_mode = true;
+                Ok(())
+            })
+            .unwrap();
+        let out = reg.daemon_start().unwrap();
+        assert_eq!(out["reason"], safe::SAFE_MODE_REASON);
+    }
+
+    #[test]
+    fn daemon_status_reports_the_guard_disabled_in_safe_and_rescue_modes() {
+        let (dir, ctx) = temp_ctx("status-enabled");
+        let reg = Registry::new(ctx, vec![]);
+        assert_eq!(reg.daemon_status().unwrap()["enabled"], json!(true));
+        reg.store()
+            .update(|c| {
+                c.safe.safe_mode = true;
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(reg.daemon_status().unwrap()["enabled"], json!(false));
+        reg.store()
+            .update(|c| {
+                c.safe.safe_mode = false;
+                Ok(())
+            })
+            .unwrap();
+        fs::write(dir.join("disable_tuning"), "").unwrap();
+        assert_eq!(reg.daemon_status().unwrap()["enabled"], json!(false));
+    }
+
+    #[test]
+    fn an_unreadable_config_pauses_writes_and_logs_once() {
+        let (reg, fake, mut state) = fixture("config-error", None);
+        assert!(fake.lock().unwrap().active);
+        // A newer config version makes `load()` fail instead of falling back to defaults.
+        fs::write(reg.ctx().config_path(), r#"{"version":999}"#).unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "the recovery release must still run when the config cannot be read"
+        );
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "no automatic writes while the config is unreadable"
+        );
+        assert_eq!(
+            gate_log_lines(&reg, "automatic writes paused"),
+            1,
+            "the read error is logged once, not on every tick"
+        );
+    }
+
+    #[test]
+    fn blocked_ticks_skip_drift_repair() {
+        let (reg, fake, mut state) = fixture("drift-blocked", None);
+        reg.store()
+            .update(|c| {
+                c.modules
+                    .insert("cpu".to_string(), json!({ "cpu.screen_off_active": false }));
+                Ok(())
+            })
+            .unwrap();
+        fs::write(reg.ctx().data_dir.join("disable_tuning"), "").unwrap();
+        reg.daemon_tick(&mut state);
+        reg.daemon_tick(&mut state);
+        assert_eq!(
+            fake.lock().unwrap().drift_calls,
+            0,
+            "drift repair and adaptive ticks must be paused while blocked"
+        );
+
+        fs::remove_file(reg.ctx().data_dir.join("disable_tuning")).unwrap();
+        reg.daemon_tick(&mut state);
+        assert!(
+            fake.lock().unwrap().drift_calls > 0,
+            "drift repair resumes once tuning is allowed"
+        );
+    }
+
+    #[test]
+    fn a_failed_release_is_logged_once_and_recovery_is_logged_once() {
+        let (reg, fake, mut state) = fixture("release-failure", None);
+        fake.lock().unwrap().release_error = Some("simulated release failure".to_string());
+        fs::write(reg.ctx().data_dir.join("disable_tuning"), "").unwrap();
+        reg.daemon_tick(&mut state);
+        reg.daemon_tick(&mut state);
+        assert!(
+            fake.lock().unwrap().active,
+            "the profile could not be released"
+        );
+        assert_eq!(
+            gate_log_lines(&reg, "screen-off profile release failed"),
+            1,
+            "a persistent release failure is logged once, not every tick"
+        );
+
+        fake.lock().unwrap().release_error = None;
+        reg.daemon_tick(&mut state);
+        assert!(
+            !fake.lock().unwrap().active,
+            "the retry releases the profile"
+        );
+        assert_eq!(
+            gate_log_lines(&reg, "screen-off profile release recovered"),
+            1
+        );
     }
 }

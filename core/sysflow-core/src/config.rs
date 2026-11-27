@@ -83,6 +83,15 @@ fn migrate(c: &mut Config) {
     }
 }
 
+/// Clamp hand-edited values that would otherwise break the boot-loop contract. Runs on every load
+/// so the in-memory config is the single source of truth for both behaviour and the values
+/// `safe-mode status` reports.
+fn normalize(c: &mut Config) {
+    // `threshold = 0` means "every boot is unconfirmed", so a cleared safe mode would fall straight
+    // back into it on the next boot. One unconfirmed boot must be allowed before giving up.
+    c.safe.threshold = c.safe.threshold.max(1);
+}
+
 /// Advisory lock implemented as an exclusive-create lock file.
 /// Stale locks (older than 10 s) are stolen so a crashed process can't wedge the config.
 struct FileLock {
@@ -156,6 +165,7 @@ impl ConfigStore {
                     )));
                 }
                 migrate(&mut c);
+                normalize(&mut c);
                 Ok(c)
             }
             Err(_) => {
@@ -272,5 +282,22 @@ mod tests {
         fs::write(&path, r#"{"version": 99}"#).unwrap();
         let store = ConfigStore::new(path);
         assert!(store.load().is_err());
+    }
+
+    #[test]
+    fn a_zero_safe_threshold_is_normalised_on_load() {
+        let dir = tmp("threshold");
+        let path = dir.join("config.json");
+        // A hand-edited threshold of 0 would re-enter safe mode on the first boot after every clear.
+        fs::write(&path, r#"{"version":1,"safe":{"threshold":0}}"#).unwrap();
+        let store = ConfigStore::new(path);
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.safe.threshold, 1);
+        // The behaviour uses the same normalized value that `safe-mode status` reports, so one
+        // unconfirmed boot is still allowed after clearing safe mode.
+        assert_eq!(
+            crate::safe::begin_boot(&mut loaded.clone()),
+            crate::safe::BootDecision::Proceed
+        );
     }
 }

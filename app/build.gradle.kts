@@ -44,6 +44,15 @@ android {
         buildConfig = true
     }
 
+    // Robolectric needs the merged unit-test resources/manifest, and its in-JVM Android sandbox does
+    // not fit in the default 512 MiB unit-test heap.
+    testOptions {
+        unitTests {
+            isIncludeAndroidResources = true
+            all { it.maxHeapSize = "1g" }
+        }
+    }
+
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
@@ -80,6 +89,9 @@ dependencies {
     implementation(libs.libsu.core)
 
     testImplementation(libs.junit)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core.ktx)
+    testImplementation(libs.kotlinx.coroutines.test)
     debugImplementation(libs.androidx.ui.tooling)
     debugImplementation(libs.androidx.ui.test.manifest)
 }
